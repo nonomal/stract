@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -31,7 +31,9 @@ use super::url_ext::UrlExt;
 
 pub use fn_cache::FnCache;
 
+mod feeds;
 mod fn_cache;
+mod headings;
 mod into_tantivy;
 pub mod links;
 mod microformats;
@@ -50,6 +52,7 @@ pub struct Html {
     clean_text: Option<String>,
     lang: Option<Lang>,
     robots: Option<EnumSet<RobotsMeta>>,
+    base_url: Url,
 }
 
 impl Html {
@@ -69,16 +72,21 @@ impl Html {
     pub fn parse_without_text(html: &str, url: &str) -> Result<Self> {
         let root = kuchiki::parse_html().one(html);
 
-        let url = Url::parse(url)?;
+        let url = Url::parse(url)?.normalize();
 
         let mut res = Self {
             root,
             all_text: None,
             clean_text: None,
             lang: None,
+            base_url: url.clone(),
             url,
             robots: None,
         };
+
+        if let Some(base_url) = res.find_base_url() {
+            res.base_url = base_url;
+        }
 
         // TODO: need to figure out when to respect
         // the canonical url, it's not always the case that
@@ -93,10 +101,23 @@ impl Html {
         //     }
         // }
 
-        res.url.normalize_in_place();
         res.robots = res.parse_robots_meta();
 
         Ok(res)
+    }
+
+    fn find_base_url(&self) -> Option<Url> {
+        self.root.select("base").unwrap().next().and_then(|node| {
+            if let Some(element) = node.as_node().as_element() {
+                if let Some(href) = element.attributes.borrow().get("href") {
+                    if let Ok(url) = Url::parse_with_base_url(self.base_url(), href) {
+                        return Some(url);
+                    }
+                }
+            }
+
+            None
+        })
     }
 
     pub fn content_type(&self) -> Option<String> {
@@ -128,7 +149,7 @@ impl Html {
                 if let Some(rel) = element.attributes.borrow().get("rel") {
                     if rel == "canonical" {
                         if let Some(href) = element.attributes.borrow().get("href") {
-                            if let Ok(url) = Url::parse_with_base_url(self.url(), href) {
+                            if let Ok(url) = Url::parse_with_base_url(self.base_url(), href) {
                                 canonical_url = Some(url);
                             }
                         }
@@ -191,6 +212,10 @@ impl Html {
         &self.url
     }
 
+    fn base_url(&self) -> &Url {
+        &self.base_url
+    }
+
     pub fn metadata(&self) -> Vec<Meta> {
         let mut metas = Vec::new();
 
@@ -244,13 +269,13 @@ impl Html {
             if let Some(link) = script
                 .attributes
                 .get("src")
-                .and_then(|link| Url::parse_with_base_url(self.url(), link).ok())
+                .and_then(|link| Url::parse_with_base_url(self.base_url(), link).ok())
             {
                 links.push(link);
             }
 
             for res in URL_REGEX.find_iter(&script.content) {
-                if let Ok(link) = Url::parse_with_base_url(self.url(), res.as_str()) {
+                if let Ok(link) = Url::parse_with_base_url(self.base_url(), res.as_str()) {
                     links.push(link);
                 }
             }
@@ -261,7 +286,7 @@ impl Html {
                 .attributes
                 .borrow()
                 .get("href")
-                .and_then(|link| Url::parse_with_base_url(self.url(), link).ok())
+                .and_then(|link| Url::parse_with_base_url(self.base_url(), link).ok())
             {
                 links.push(link);
             }
@@ -395,7 +420,7 @@ impl Html {
                         .many()
                         .into_iter()
                         .filter_map(|url| url.try_into_string())
-                        .filter_map(|url| Url::parse_with_base_url(self.url(), &url).ok())
+                        .filter_map(|url| Url::parse_with_base_url(self.base_url(), &url).ok())
                 })
             })
             .flatten()
@@ -783,7 +808,7 @@ mod tests {
         assert!(webpage.all_text().is_some());
         assert!(!webpage.all_text().unwrap().is_empty());
 
-        let index =
+        let (index, _dir) =
             crate::inverted_index::InvertedIndex::temporary().expect("Unable to open index");
         webpage.as_tantivy(&index).unwrap();
     }
@@ -1182,5 +1207,76 @@ mod tests {
         "##, "https://www.example.com/whatever").unwrap();
 
         assert!(html.likely_has_paywall());
+    }
+
+    #[test]
+    fn test_base_url() {
+        let html = Html::parse(
+            r##"
+        <html>
+            <head>
+                <base href="https://www.example.com/base/" />
+            </head>
+            <body>
+                <a href="link1">Link 1</a>
+                <a href="link2">Link 2</a>
+                <a href="https://www.example.com/link3">Link 3</a>
+                <a href="https://www.another.com/">Link 4</a>
+            </body>
+        </html>
+        "##,
+            "https://www.example.com/",
+        )
+        .unwrap();
+
+        assert_eq!(
+            html.base_url(),
+            &Url::parse("https://www.example.com/base/").unwrap()
+        );
+        assert_eq!(
+            html.all_links()
+                .iter()
+                .map(|l| l.destination.to_string())
+                .collect::<Vec<String>>(),
+            vec![
+                "https://www.example.com/base/link1",
+                "https://www.example.com/base/link2",
+                "https://www.example.com/link3",
+                "https://www.another.com/",
+            ]
+        );
+
+        let html = Html::parse(
+            r##"
+        <html>
+            <head>
+                <div>
+                    <base href="https://www.example.com/base/" />
+                </div>
+            </head>
+            <body>
+                <a href="link1">Link 1</a>
+                <a href="link2">Link 2</a>
+            </body>
+        </html>
+        "##,
+            "https://www.example.com/",
+        )
+        .unwrap();
+
+        assert_eq!(
+            html.base_url(),
+            &Url::parse("https://www.example.com/base/").unwrap()
+        );
+        assert_eq!(
+            html.all_links()
+                .iter()
+                .map(|l| l.destination.to_string())
+                .collect::<Vec<String>>(),
+            vec![
+                "https://www.example.com/base/link1",
+                "https://www.example.com/base/link2",
+            ]
+        );
     }
 }

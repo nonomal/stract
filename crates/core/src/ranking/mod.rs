@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn host_centrality_ranking() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -198,7 +198,7 @@ mod tests {
         index.commit().expect("failed to commit index");
         let searcher = LocalSearcher::from(index);
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 ..Default::default()
             })
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn page_centrality_ranking() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -264,7 +264,7 @@ mod tests {
         index.commit().expect("failed to commit index");
         let searcher = LocalSearcher::from(index);
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 ..Default::default()
             })
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn freshness_ranking() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -332,7 +332,7 @@ mod tests {
         index.commit().expect("failed to commit index");
         let searcher = LocalSearcher::from(index);
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "title".to_string(),
                 return_ranking_signals: true,
                 signal_coefficients: crate::enum_map! {
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn derank_trackers() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -405,7 +405,7 @@ mod tests {
         index.commit().expect("failed to commit index");
         let searcher = LocalSearcher::from(index);
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "test".to_string(),
                 ..Default::default()
             })
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn backlink_text() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut webpage = Webpage {
             html: Html::parse(
@@ -471,7 +471,7 @@ mod tests {
         index.commit().expect("failed to commit index");
         let searcher = LocalSearcher::from(index);
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "test".to_string(),
                 ..Default::default()
             })
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn custom_signal_aggregation() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -557,7 +557,7 @@ mod tests {
         let searcher = LocalSearcher::new(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
 
                 signal_coefficients: crate::enum_map! {
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(&res.webpages[0].url, "https://www.title.com/");
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
 
                 signal_coefficients: crate::enum_map! {
@@ -590,7 +590,7 @@ mod tests {
 
     #[test]
     fn fetch_time_ranking() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -643,7 +643,7 @@ mod tests {
         let searcher = LocalSearcher::new(index);
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "test".to_string(),
                 signal_coefficients: crate::enum_map! {
                     crate::ranking::SignalEnum::from(crate::ranking::signals::FetchTimeMs) => 100_000.0,
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn num_slashes_and_digits() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -736,7 +736,7 @@ mod tests {
         let searcher = LocalSearcher::new(index);
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "test".to_string(),
 
                 signal_coefficients: crate::enum_map! {
@@ -755,10 +755,16 @@ mod tests {
         assert_eq!(result.webpages[2].url, "https://www.third.com/one/two123");
     }
 
-    fn setup_worker(data_path: &Path) -> IndexingWorker {
-        crate::block_on(IndexingWorker::new(
+    fn setup_worker(data_path: &Path) -> (IndexingWorker, file_store::temp::TempDir) {
+        let temp_dir = file_store::temp::TempDir::new().unwrap();
+        let worker = crate::block_on(IndexingWorker::new(
             IndexerConfig {
-                host_centrality_store_path: crate::gen_temp_path().to_str().unwrap().to_string(),
+                host_centrality_store_path: temp_dir
+                    .as_ref()
+                    .join("host_centrality")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
                 page_centrality_store_path: None,
                 page_webgraph: None,
                 safety_classifier_path: None,
@@ -766,11 +772,16 @@ mod tests {
                     model_path: data_path.to_str().unwrap().to_string(),
                     page_centrality_rank_threshold: None,
                 }),
-                output_path: crate::gen_temp_path().to_str().unwrap().to_string(),
+                output_path: temp_dir
+                    .as_ref()
+                    .join("output")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
                 limit_warc_files: None,
                 skip_warc_files: None,
                 warc_source: WarcSource::Local(crate::config::LocalConfig {
-                    folder: crate::gen_temp_path().to_str().unwrap().to_string(),
+                    folder: temp_dir.as_ref().join("warc").to_str().unwrap().to_string(),
                     names: vec!["".to_string()],
                 }),
                 host_centrality_threshold: None,
@@ -780,7 +791,9 @@ mod tests {
                     crate::config::defaults::Indexing::autocommit_after_num_inserts(),
             }
             .into(),
-        ))
+        ));
+
+        (worker, temp_dir)
     }
 
     #[test]
@@ -791,9 +804,9 @@ mod tests {
             return;
         }
 
-        let worker = setup_worker(data_path);
+        let (worker, _worker_dir) = setup_worker(data_path);
 
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut pages = vec![
             Webpage::test_parse(
@@ -846,7 +859,7 @@ mod tests {
             .set_dual_encoder(DualEncoder::open(data_path).expect("failed to open dual encoder"));
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "best chocolate cake".to_string(),
 
                 signal_coefficients: crate::enum_map! {
@@ -869,9 +882,9 @@ mod tests {
             return;
         }
 
-        let worker = setup_worker(data_path);
+        let (worker, _worker_dir) = setup_worker(data_path);
 
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut a = Webpage::test_parse(
             &format!(
@@ -934,7 +947,7 @@ mod tests {
             .set_dual_encoder(DualEncoder::open(data_path).expect("failed to open dual encoder"));
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "best chocolate cake".to_string(),
 
                 signal_coefficients: crate::enum_map! {
@@ -951,7 +964,7 @@ mod tests {
 
     #[test]
     fn title_coverage() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -981,7 +994,7 @@ mod tests {
         let searcher = LocalSearcher::new(index);
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "test website".to_string(),
                 return_ranking_signals: true,
                 ..Default::default()
@@ -1004,7 +1017,7 @@ mod tests {
         );
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "test example".to_string(),
                 return_ranking_signals: true,
                 ..Default::default()
@@ -1029,7 +1042,7 @@ mod tests {
 
     #[test]
     fn clean_body_coverage() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut page = Webpage {
             html: Html::parse(
@@ -1061,7 +1074,7 @@ mod tests {
         let searcher = LocalSearcher::new(index);
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "test website".to_string(),
                 return_ranking_signals: true,
                 ..Default::default()
@@ -1084,7 +1097,7 @@ mod tests {
         );
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "test b".to_string(),
                 return_ranking_signals: true,
                 ..Default::default()

@@ -33,7 +33,7 @@ use distributed::{
     cluster::Cluster,
     member::{Member, Service},
 };
-pub use file_store::gen_temp_path;
+pub use file_store::{gen_temp_dir, gen_temp_path};
 use std::{cmp::Reverse, sync::Arc};
 use thiserror::Error;
 
@@ -42,7 +42,7 @@ pub mod inverted_index;
 
 pub mod ampc;
 
-mod api;
+pub mod api;
 pub mod autosuggest;
 mod backlink_grouper;
 pub mod bangs;
@@ -52,6 +52,7 @@ pub mod canon_index;
 mod collector;
 pub mod config;
 pub mod crawler;
+mod dated_url;
 pub mod distributed;
 pub mod entity_index;
 mod enum_map;
@@ -64,6 +65,7 @@ pub mod image_store;
 mod improvement;
 pub mod index;
 mod intmap;
+pub mod iter_ext;
 mod kahan_sum;
 mod leaky_queue;
 mod live_index;
@@ -82,6 +84,7 @@ mod search_prettifier;
 pub mod searcher;
 mod simhash;
 pub mod similar_hosts;
+mod sitemap;
 mod snippet;
 mod stopwords;
 pub mod summarizer;
@@ -145,22 +148,17 @@ pub fn start_gossip_cluster_thread(config: GossipConfig, service: Option<Service
         rt.block_on(async {
             let cluster = match service {
                 Some(service) => Cluster::join(
-                    Member {
-                        id: config.cluster_id,
-                        service,
-                    },
+                    Member::new(service),
                     config.addr,
                     config.seed_nodes.unwrap_or_default(),
                 )
                 .await
                 .unwrap(),
-                None => Cluster::join_as_spectator(
-                    config.cluster_id,
-                    config.addr,
-                    config.seed_nodes.unwrap_or_default(),
-                )
-                .await
-                .unwrap(),
+                None => {
+                    Cluster::join_as_spectator(config.addr, config.seed_nodes.unwrap_or_default())
+                        .await
+                        .unwrap()
+                }
             };
 
             let cluster = Arc::new(cluster);

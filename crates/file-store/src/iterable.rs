@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>
 
 //! This module contains the implementation of the `IterableStoreWriter` and `IterableStoreReader`.
+//!
 //! The iterable store is a simple format for storing a sequence of items in a file such that they
 //! can be read back in order. The format is as follows:
 //!
@@ -338,6 +339,19 @@ impl<T> ConstIterableStoreReader<T> {
     }
 }
 
+impl<T> ConstIterableStoreReader<T>
+where
+    T: ConstSerializable,
+{
+    pub fn len(&self) -> usize {
+        self.data.len() / T::BYTES
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 impl<T> Iterator for ConstIterableStoreReader<T>
 where
     T: ConstSerializable,
@@ -429,5 +443,18 @@ mod tests {
 
         let items: Vec<i32> = reader.collect();
         assert_eq!(items, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_const_iterable_store_len() {
+        let mut writer = ConstIterableStoreWriter::new(Vec::new());
+        writer.write(&1).unwrap();
+        writer.write(&2).unwrap();
+        writer.write(&3).unwrap();
+        let writer = writer.finalize().unwrap();
+
+        let reader = ConstIterableStoreReader::<i32>::from_bytes(writer);
+
+        assert_eq!(reader.len(), 3);
     }
 }

@@ -58,7 +58,8 @@ sonic_service!(
         RawOutgoingEdges,
         RawIngoingEdgesWithLabels,
         RawOutgoingEdgesWithLabels,
-        PagesByHosts
+        PagesByHosts,
+        GetNodeIDs
     ]
 );
 
@@ -180,6 +181,51 @@ impl Message<WebGraphService> for PagesByHosts {
     }
 }
 
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+pub struct InDegreeUpperBound {
+    pub node: NodeID,
+}
+
+impl Message<WebGraphService> for InDegreeUpperBound {
+    type Response = u64;
+
+    async fn handle(self, server: &WebGraphService) -> Self::Response {
+        server.graph.in_degree_upper_bound(&self.node)
+    }
+}
+
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+pub struct OutDegreeUpperBound {
+    pub node: NodeID,
+}
+
+impl Message<WebGraphService> for OutDegreeUpperBound {
+    type Response = u64;
+
+    async fn handle(self, server: &WebGraphService) -> Self::Response {
+        server.graph.out_degree_upper_bound(&self.node)
+    }
+}
+
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+pub struct GetNodeIDs {
+    pub offset: u64,
+    pub limit: u64,
+}
+
+impl Message<WebGraphService> for GetNodeIDs {
+    type Response = Vec<NodeID>;
+
+    async fn handle(self, server: &WebGraphService) -> Self::Response {
+        server
+            .graph
+            .iter_nodes_with_offset(self.offset)
+            .take(self.limit as usize)
+            .map(|(id, _)| id)
+            .collect()
+    }
+}
+
 pub async fn run(config: config::WebgraphServerConfig) -> Result<()> {
     let addr: SocketAddr = config.host;
 
@@ -190,14 +236,11 @@ pub async fn run(config: config::WebgraphServerConfig) -> Result<()> {
     // dropping the handle leaves the cluster
     let _cluster = Arc::new(
         Cluster::join(
-            Member {
-                id: config.cluster_id,
-                service: Service::Webgraph {
-                    host: addr,
-                    granularity: config.granularity,
-                    shard: config.shard,
-                },
-            },
+            Member::new(Service::Webgraph {
+                host: addr,
+                granularity: config.granularity,
+                shard: config.shard,
+            }),
             config.gossip_addr,
             config.gossip_seed_nodes.unwrap_or_default(),
         )

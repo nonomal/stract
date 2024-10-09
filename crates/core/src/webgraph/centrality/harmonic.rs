@@ -36,6 +36,7 @@ const HYPERLOGLOG_COUNTERS: usize = 64;
 pub static SKIPPED_REL: std::sync::LazyLock<RelFlags> = std::sync::LazyLock::new(|| {
     RelFlags::TAG
         | RelFlags::NOFOLLOW
+        | RelFlags::SPONSORED
         | RelFlags::IS_IN_FOOTER
         | RelFlags::IS_IN_NAVIGATION
         | RelFlags::PRIVACY_POLICY
@@ -311,6 +312,8 @@ impl HarmonicCentrality {
 
 #[cfg(test)]
 mod tests {
+    use file_store::temp::TempDir;
+
     use super::*;
     use crate::{
         webgraph::{Node, WebgraphWriter},
@@ -337,9 +340,10 @@ mod tests {
         ]
     }
 
-    fn test_graph() -> Webgraph {
+    fn test_graph() -> (Webgraph, TempDir) {
+        let temp_dir = crate::gen_temp_dir().unwrap();
         let mut writer = WebgraphWriter::new(
-            crate::gen_temp_path(),
+            temp_dir.as_ref().join("test"),
             crate::executor::Executor::single_thread(),
             crate::webgraph::Compression::default(),
             None,
@@ -349,13 +353,16 @@ mod tests {
             writer.insert(from, to, label, RelFlags::default());
         }
 
-        writer.finalize()
+        let graph = writer.finalize();
+
+        (graph, temp_dir)
     }
 
     #[test]
     fn host_harmonic_centrality() {
+        let temp_dir = crate::gen_temp_dir().unwrap();
         let mut writer = WebgraphWriter::new(
-            crate::gen_temp_path(),
+            temp_dir.as_ref().join("test"),
             crate::executor::Executor::single_thread(),
             crate::webgraph::Compression::default(),
             None,
@@ -458,7 +465,7 @@ mod tests {
 
     #[test]
     fn harmonic_centrality() {
-        let graph = test_graph();
+        let (graph, _temp_dir) = test_graph();
         let centrality = HarmonicCentrality::calculate(&graph);
 
         assert!(
@@ -474,11 +481,12 @@ mod tests {
 
     #[test]
     fn additional_edges_ignored() {
-        let graph = test_graph();
+        let (graph, _temp_dir) = test_graph();
         let centrality = HarmonicCentrality::calculate(&graph);
 
+        let temp_dir = crate::gen_temp_dir().unwrap();
         let mut other = WebgraphWriter::new(
-            crate::gen_temp_path(),
+            temp_dir.as_ref().join("test"),
             crate::executor::Executor::single_thread(),
             crate::webgraph::Compression::default(),
             None,
@@ -548,8 +556,9 @@ mod tests {
 
     #[test]
     fn test_rel_flag_ignored() {
+        let temp_dir = crate::gen_temp_dir().unwrap();
         let mut graph = WebgraphWriter::new(
-            crate::gen_temp_path(),
+            temp_dir.as_ref().join("test"),
             crate::executor::Executor::single_thread(),
             crate::webgraph::Compression::default(),
             None,
@@ -568,8 +577,9 @@ mod tests {
 
     #[test]
     fn test_same_icann_domain_ignored() {
+        let temp_dir = crate::gen_temp_dir().unwrap();
         let mut graph = WebgraphWriter::new(
-            crate::gen_temp_path(),
+            &temp_dir,
             crate::executor::Executor::single_thread(),
             crate::webgraph::Compression::default(),
             None,

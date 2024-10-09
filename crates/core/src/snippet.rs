@@ -389,7 +389,7 @@ Survey in 2016, 2017, and 2018."#;
 
     #[test]
     fn snippet_during_search() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -416,7 +416,7 @@ Survey in 2016, 2017, and 2018."#;
         let searcher = LocalSearcher::from(index);
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "rust language".to_string(),
                 ..Default::default()
             })
@@ -428,7 +428,7 @@ Survey in 2016, 2017, and 2018."#;
 
     #[test]
     fn stemmed_words_snippet_highlight() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -455,7 +455,7 @@ Survey in 2016, 2017, and 2018."#;
         let searcher = LocalSearcher::from(index);
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "describe".to_string(),
                 ..Default::default()
             })
@@ -467,7 +467,7 @@ Survey in 2016, 2017, and 2018."#;
 
     #[test]
     fn test_stemmed_term() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -494,7 +494,7 @@ Survey in 2016, 2017, and 2018."#;
         let searcher = LocalSearcher::from(index);
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "paradigms".to_string(),
                 ..Default::default()
             })

@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -45,6 +45,7 @@ sonic_service!(
         GetHomepageDescriptions,
         TopKeyPhrases,
         Size,
+        GetSiteUrls,
     ]
 );
 
@@ -70,16 +71,13 @@ impl SearchService {
         }
 
         local_searcher.set_collector_config(config.collector);
-        local_searcher.set_snippet_config(config.snippet);
+        local_searcher.set_snippet_config(config.snippet).await;
 
         let cluster_handle = Cluster::join(
-            Member {
-                id: config.cluster_id,
-                service: Service::Searcher {
-                    host: config.host,
-                    shard: config.shard,
-                },
-            },
+            Member::new(Service::Searcher {
+                host: config.host,
+                shard: config.shard,
+            }),
             config.gossip_addr,
             config.gossip_seed_nodes.unwrap_or_default(),
         )
@@ -103,6 +101,7 @@ impl sonic::service::Message<SearchService> for RetrieveWebsites {
         server
             .local_searcher
             .retrieve_websites(&self.websites, &self.query)
+            .await
             .ok()
     }
 }
@@ -114,7 +113,11 @@ pub struct Search {
 impl sonic::service::Message<SearchService> for Search {
     type Response = Option<InitialWebsiteResult>;
     async fn handle(self, server: &SearchService) -> Self::Response {
-        server.local_searcher.search_initial(&self.query, true).ok()
+        server
+            .local_searcher
+            .search_initial(&self.query, true)
+            .await
+            .ok()
     }
 }
 
@@ -125,7 +128,7 @@ pub struct GetWebpage {
 impl sonic::service::Message<SearchService> for GetWebpage {
     type Response = Option<RetrievedWebpage>;
     async fn handle(self, server: &SearchService) -> Self::Response {
-        server.local_searcher.get_webpage(&self.url)
+        server.local_searcher.get_webpage(&self.url).await
     }
 }
 
@@ -140,7 +143,7 @@ impl sonic::service::Message<SearchService> for GetHomepageDescriptions {
         let mut result = HashMap::with_capacity(self.urls.len());
 
         for url in &self.urls {
-            if let Some(homepage) = server.local_searcher.get_homepage(url) {
+            if let Some(homepage) = server.local_searcher.get_homepage(url).await {
                 if let Some(desc) = homepage.description() {
                     result.insert(url.clone(), desc.clone());
                 }
@@ -158,7 +161,7 @@ pub struct TopKeyPhrases {
 impl sonic::service::Message<SearchService> for TopKeyPhrases {
     type Response = Vec<KeyPhrase>;
     async fn handle(self, server: &SearchService) -> Self::Response {
-        server.local_searcher.top_key_phrases(self.top_n)
+        server.local_searcher.top_key_phrases(self.top_n).await
     }
 }
 
@@ -183,8 +186,34 @@ impl sonic::service::Message<SearchService> for Size {
                 .local_searcher
                 .index()
                 .guard()
+                .await
                 .inverted_index()
                 .num_documents(),
         }
+    }
+}
+
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+pub struct GetSiteUrls {
+    pub site: String,
+    pub offset: u64,
+    pub limit: u64,
+}
+
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+pub struct SiteUrls {
+    #[bincode(with_serde)]
+    pub urls: Vec<Url>,
+}
+
+impl sonic::service::Message<SearchService> for GetSiteUrls {
+    type Response = SiteUrls;
+    async fn handle(self, server: &SearchService) -> Self::Response {
+        let urls = server
+            .local_searcher
+            .get_site_urls(&self.site, self.offset as usize, self.limit as usize)
+            .await;
+
+        SiteUrls { urls }
     }
 }

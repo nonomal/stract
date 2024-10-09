@@ -252,7 +252,7 @@ mod tests {
 
     use crate::{
         bangs::Bangs,
-        enum_map, gen_temp_path,
+        enum_map,
         index::Index,
         searcher::{
             api::{ApiSearcher, Config},
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn discard_and_boost_hosts() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -323,7 +323,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 signal_coefficients: enum_map! {
                     crate::ranking::SignalEnum::from(crate::ranking::signals::core::Bm25Title) => 1_000_000.0
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(res[1].url, "https://www.a.com/");
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(res[0].url, "https://www.a.com/");
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn example_optics_dont_crash() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -444,7 +444,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let _ = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(include_str!(
@@ -458,7 +458,7 @@ mod tests {
             .webpages;
 
         let _ = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(include_str!(
@@ -472,7 +472,7 @@ mod tests {
             .webpages;
 
         let _ = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(include_str!(
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn empty_discard() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -568,7 +568,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -602,10 +602,11 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn liked_hosts() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let dir = crate::gen_temp_dir().unwrap();
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut writer = WebgraphWriter::new(
-            gen_temp_path(),
+            &dir,
             crate::executor::Executor::single_thread(),
             crate::webgraph::Compression::default(),
             None,
@@ -761,7 +762,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn schema_org_search() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -843,7 +844,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -867,7 +868,7 @@ mod tests {
         assert_eq!(res[0].url, "https://www.b.com/");
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -891,7 +892,7 @@ mod tests {
         assert_eq!(res[0].url, "https://www.b.com/");
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -915,7 +916,7 @@ mod tests {
         assert_eq!(res[0].url, "https://www.a.com/");
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "website".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -941,7 +942,7 @@ mod tests {
 
     #[test]
     fn pattern_same_phrase() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -972,7 +973,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "site:stackoverflow.com".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1007,7 +1008,7 @@ mod tests {
 
     #[test]
     fn discard_all_discard_like() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -1062,7 +1063,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1094,7 +1095,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn special_pattern_syntax() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -1124,7 +1125,7 @@ mod tests {
 
         let searcher = LocalSearcher::from(index);
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 ..Default::default()
             })
@@ -1134,7 +1135,7 @@ mod tests {
         assert_eq!(res[0].url, "https://example.com/");
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"is\") }, Action(Discard) }").unwrap(),
@@ -1146,7 +1147,7 @@ mod tests {
         assert_eq!(res.len(), 0);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"|is\") }, Action(Discard) }").unwrap(),
@@ -1158,7 +1159,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"|This\") }, Action(Discard) }").unwrap(),
@@ -1170,7 +1171,7 @@ mod tests {
         assert_eq!(res.len(), 0);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"|This an\") }, Action(Discard) }")
@@ -1183,7 +1184,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"|This * an\") }, Action(Discard) }")
@@ -1196,7 +1197,7 @@ mod tests {
         assert_eq!(res.len(), 0);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Site(\"example.com\") }, Action(Discard) }")
@@ -1209,7 +1210,7 @@ mod tests {
         assert_eq!(res.len(), 0);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Site(\"|example.com\") }, Action(Discard) }")
@@ -1222,7 +1223,7 @@ mod tests {
         assert_eq!(res.len(), 0);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Site(\"|example.com|\") }, Action(Discard) }")
@@ -1235,7 +1236,7 @@ mod tests {
         assert_eq!(res.len(), 0);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"website.com|\") }, Action(Discard) }")
@@ -1250,7 +1251,7 @@ mod tests {
 
     #[test]
     fn active_optic_with_blocked_hosts() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -1281,7 +1282,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1296,7 +1297,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1318,7 +1319,7 @@ mod tests {
 
     #[test]
     fn empty_optic_noop() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -1349,7 +1350,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(Optic::parse("").unwrap()),
                 ..Default::default()
@@ -1359,7 +1360,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"\") }, Action(Discard) }").unwrap(),
@@ -1374,7 +1375,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn wildcard_edge_cases() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage {
@@ -1429,7 +1430,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"*\") }, Action(Discard) }").unwrap(),
@@ -1441,7 +1442,7 @@ mod tests {
         assert_eq!(res.len(), 0);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"* is\") }, Action(Discard) }").unwrap(),
@@ -1453,7 +1454,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"* This is\") }, Action(Discard) }")
@@ -1466,7 +1467,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"example *\") }, Action(Discard) }")
@@ -1479,7 +1480,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1496,7 +1497,7 @@ mod tests {
 
     #[test]
     fn empty_double_anchor() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut page = Webpage {
             html: Html::parse(
@@ -1525,7 +1526,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 ..Default::default()
             })
@@ -1534,7 +1535,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("DiscardNonMatching; Rule { Matches { Content(\"||\") }, Action(Boost(0)) }")
@@ -1547,7 +1548,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1564,7 +1565,7 @@ mod tests {
 
     #[test]
     fn indieweb_search() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut page = Webpage {
             html: Html::parse(
@@ -1621,7 +1622,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 ..Default::default()
             })
@@ -1630,7 +1631,7 @@ mod tests {
         assert_eq!(res.len(), 2);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1648,7 +1649,7 @@ mod tests {
 
     #[test]
     fn site_double_anchor() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut page = Webpage {
             html: Html::parse(
@@ -1700,7 +1701,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 ..Default::default()
             })
@@ -1709,7 +1710,7 @@ mod tests {
         assert_eq!(res.len(), 2);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1725,7 +1726,7 @@ mod tests {
         assert_eq!(res[0].url, "https://example.com/test");
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Site(\"|example.com|\") }, Action(Discard) }")
@@ -1741,7 +1742,7 @@ mod tests {
 
     #[test]
     fn apostrophe_token() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut page = Webpage {
             html: Html::parse(
@@ -1814,7 +1815,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("Rule { Matches { Title(\"*'s collection\") }, Action(Discard) }")
@@ -1830,7 +1831,7 @@ mod tests {
 
     #[test]
     fn discard_double_matching() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let mut page = Webpage {
             html: Html::parse(
@@ -1902,7 +1903,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("DiscardNonMatching; Rule { Matches { Title(\"*'s collection\") }, Action(Discard) }; Rule { Matches { Site(\"*.com\") } }")
@@ -1918,7 +1919,7 @@ mod tests {
 
     #[test]
     fn test_site_in_domain_rule() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         let page = Webpage {
             html: Html::parse(
@@ -1944,7 +1945,7 @@ mod tests {
         let searcher = LocalSearcher::from(index);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1959,7 +1960,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse(
@@ -1974,7 +1975,7 @@ mod tests {
         assert_eq!(res.len(), 1);
 
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "example".to_string(),
                 optic: Some(
                     Optic::parse("DiscardNonMatching; Rule { Matches { Domain(\"|another.example.com|\") } } ")

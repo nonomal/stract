@@ -41,6 +41,10 @@ impl Id2NodeDb {
         self.db.iter().map(|(id, _)| id)
     }
 
+    pub fn iter_with_offset(&self, offset: u64) -> impl Iterator<Item = (NodeID, Node)> + '_ {
+        self.db.iter_with_offset(offset)
+    }
+
     pub fn estimate_num_keys(&self) -> usize {
         self.db.len()
     }
@@ -65,11 +69,11 @@ impl Id2NodeDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gen_temp_path;
 
     #[test]
     fn test_id2node_db() {
-        let mut db = Id2NodeDb::open(gen_temp_path());
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut db = Id2NodeDb::open(&temp_dir);
 
         let a_node = Node::from("a".to_string());
         let a_id = NodeID::from(0_u64);

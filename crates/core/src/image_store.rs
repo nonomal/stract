@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -261,7 +261,8 @@ mod tests {
             .into(),
         );
         let key = "test".to_string();
-        let mut store = BaseImageStore::open(crate::gen_temp_path());
+        let temp_dir = file_store::gen_temp_dir().unwrap();
+        let mut store = BaseImageStore::open(temp_dir.as_ref().join("image_store"));
         store.prepare_writer();
 
         assert_eq!(store.get(&key), None);

@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>
 
 use tantivy::index::SegmentId;
+use tantivy::indexer::{MergeOperation, SegmentEntry};
 use tantivy::merge_policy::NoMergePolicy;
 
 use tantivy::{IndexWriter, SegmentMeta};
@@ -153,21 +154,37 @@ impl InvertedIndex {
         Ok(())
     }
 
-    #[allow(clippy::missing_panics_doc)] // cannot panic as writer is prepared
-    pub fn merge_segments_by_id(&mut self, segments: &[SegmentId]) -> Result<()> {
-        self.prepare_writer()?;
-
+    pub async fn start_merge_segments_by_id(
+        &self,
+        segments: &[SegmentId],
+    ) -> Result<(Option<SegmentEntry>, MergeOperation)> {
         if segments.is_empty() {
-            return Ok(());
+            anyhow::bail!("no segments to merge");
         }
 
-        self.writer
+        let (entry, op) = self
+            .writer
+            .as_ref()
+            .expect("writer has not been prepared")
+            .start_merge(segments)
+            .await?;
+
+        Ok((entry, op))
+    }
+
+    pub fn end_merge_segments_by_id(
+        &mut self,
+        merge_operation: MergeOperation,
+        segment_entry: Option<SegmentEntry>,
+    ) -> Result<Option<SegmentId>> {
+        self.prepare_writer()?;
+        let res = self
+            .writer
             .as_mut()
             .expect("writer has not been prepared")
-            .merge(segments)
-            .wait()?;
+            .end_merge(merge_operation, segment_entry)?;
 
-        Ok(())
+        Ok(res.map(|seg| seg.id()))
     }
 
     #[must_use]
@@ -312,7 +329,7 @@ mod test {
 
     #[test]
     fn test_delete_segments() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(

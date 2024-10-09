@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use url::Url;
 
 use crate::{
-    config::WebgraphGranularity,
+    config,
     distributed::{
         cluster::Cluster,
         member::{Service, ShardId},
@@ -31,9 +31,10 @@ use crate::{
                 AllShardsSelector, RandomReplicaSelector, RemoteClient, ReplicatedClient,
             },
         },
+        streaming_response::StreamingResponse,
     },
     entrypoint::webgraph_server::{
-        GetNode, IngoingEdges, OutgoingEdges, PagesByHosts, RawIngoingEdges,
+        GetNode, GetNodeIDs, IngoingEdges, OutgoingEdges, PagesByHosts, RawIngoingEdges,
         RawIngoingEdgesWithLabels, RawOutgoingEdges, RawOutgoingEdgesWithLabels, WebGraphService,
     },
     Result,
@@ -41,18 +42,40 @@ use crate::{
 
 use super::{Edge, EdgeLimit, FullEdge, Node, NodeID};
 
-struct WebgraphClientManager {
-    granularity: WebgraphGranularity,
+struct WebgraphClientManager<G: WebgraphGranularity>(std::marker::PhantomData<G>);
+
+pub trait WebgraphGranularity: Clone {
+    fn granularity() -> config::WebgraphGranularity;
 }
 
-impl sonic::replication::ReusableClientManager for WebgraphClientManager {
+#[derive(Clone)]
+pub struct Page;
+
+impl WebgraphGranularity for Page {
+    fn granularity() -> config::WebgraphGranularity {
+        config::WebgraphGranularity::Page
+    }
+}
+
+#[derive(Clone)]
+pub struct Host;
+
+impl WebgraphGranularity for Host {
+    fn granularity() -> config::WebgraphGranularity {
+        config::WebgraphGranularity::Host
+    }
+}
+
+impl<G> sonic::replication::ReusableClientManager for WebgraphClientManager<G>
+where
+    G: WebgraphGranularity,
+{
     const CLIENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
     type Service = WebGraphService;
     type ShardId = ShardId;
 
     async fn new_client(
-        &self,
         cluster: &Cluster,
     ) -> sonic::replication::ShardedClient<Self::Service, Self::ShardId> {
         let shards = cluster
@@ -66,7 +89,7 @@ impl sonic::replication::ReusableClientManager for WebgraphClientManager {
                     granularity,
                 } = member.service
                 {
-                    if granularity == self.granularity {
+                    if granularity == G::granularity() {
                         Some((shard, RemoteClient::<WebGraphService>::new(host)))
                     } else {
                         None
@@ -90,38 +113,38 @@ impl sonic::replication::ReusableClientManager for WebgraphClientManager {
 }
 
 #[derive(Clone)]
-pub struct RemoteWebgraph {
-    client: Arc<Mutex<sonic::replication::ReusableShardedClient<WebgraphClientManager>>>,
+pub struct RemoteWebgraph<G: WebgraphGranularity> {
+    client: Arc<Mutex<sonic::replication::ReusableShardedClient<WebgraphClientManager<G>>>>,
+    cluster: Arc<Cluster>,
 }
 
-impl RemoteWebgraph {
-    pub async fn new(cluster: Arc<Cluster>, granularity: WebgraphGranularity) -> Self {
-        let manager = WebgraphClientManager { granularity };
-
-        #[cfg(feature = "dev")]
-        {
-            tracing::info!("waiting for {granularity} webgraph to come online...");
-            cluster
-                .await_member(|member| {
-                    if let Service::Webgraph {
-                        host: _,
-                        shard: _,
-                        granularity: remote_granularity,
-                    } = member.service
-                    {
-                        granularity == remote_granularity
-                    } else {
-                        false
-                    }
-                })
-                .await;
-        }
-
+impl<G: WebgraphGranularity> RemoteWebgraph<G> {
+    pub async fn new(cluster: Arc<Cluster>) -> Self {
         Self {
             client: Arc::new(Mutex::new(
-                sonic::replication::ReusableShardedClient::new(cluster, manager).await,
+                sonic::replication::ReusableShardedClient::new(cluster.clone()).await,
             )),
+            cluster,
         }
+    }
+
+    pub async fn await_ready(&self) {
+        let granularity = G::granularity();
+        tracing::info!("waiting for {granularity} webgraph to come online...");
+        self.cluster
+            .await_member(|member| {
+                if let Service::Webgraph {
+                    host: _,
+                    shard: _,
+                    granularity: remote_granularity,
+                } = member.service
+                {
+                    granularity == remote_granularity
+                } else {
+                    false
+                }
+            })
+            .await;
     }
 
     async fn conn(&self) -> Arc<sonic::replication::ShardedClient<WebGraphService, ShardId>> {
@@ -434,6 +457,48 @@ impl RemoteWebgraph {
                 reps.into_iter().flat_map(|(_, rep)| rep)
             })
             .unique()
+            .collect())
+    }
+
+    pub async fn stream_node_ids(&self) -> impl futures::Stream<Item = NodeID> {
+        StreamNodeIDs::new(self.conn().await).stream()
+    }
+}
+
+pub struct StreamNodeIDs {
+    offset: u64,
+    limit: u64,
+    conn: Arc<sonic::replication::ShardedClient<WebGraphService, ShardId>>,
+}
+
+impl StreamNodeIDs {
+    pub fn new(conn: Arc<sonic::replication::ShardedClient<WebGraphService, ShardId>>) -> Self {
+        Self {
+            offset: 0,
+            limit: 2048,
+            conn,
+        }
+    }
+}
+
+impl StreamingResponse for StreamNodeIDs {
+    type Item = NodeID;
+
+    async fn next_batch(&mut self) -> Result<Vec<Self::Item>> {
+        let req = GetNodeIDs {
+            offset: self.offset,
+            limit: self.limit,
+        };
+
+        let res = self
+            .conn
+            .send(req, &AllShardsSelector, &RandomReplicaSelector)
+            .await?;
+        self.offset += self.limit;
+
+        Ok(res
+            .into_iter()
+            .flat_map(|(_, v)| v.into_iter().flat_map(|(_, v)| v))
             .collect())
     }
 }

@@ -17,32 +17,61 @@
 use std::{
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock, RwLockReadGuard},
+    sync::Arc,
 };
+
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use itertools::Itertools;
 use simple_wal::Wal;
-use tantivy::index::SegmentId;
+use tantivy::{
+    index::SegmentId,
+    indexer::{MergeOperation, SegmentEntry},
+};
 
 use std::collections::{HashMap, HashSet};
 
 use crate::{
     config::SnippetConfig,
     entrypoint::indexer::{self, IndexableWebpage, IndexingWorker},
+    inverted_index::InvertedIndex,
     live_index::{BATCH_SIZE, TTL},
     searcher::SearchableIndex,
     Result,
 };
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-struct Segment {
+pub struct Segment {
     id: SegmentId,
     created: DateTime<Utc>,
 }
 
+impl Segment {
+    pub fn id(&self) -> SegmentId {
+        self.id
+    }
+
+    pub fn created(&self) -> DateTime<Utc> {
+        self.created
+    }
+}
+
+pub struct CompactOperation {
+    segments: Vec<Segment>,
+    entry: Option<SegmentEntry>,
+    merge_op: MergeOperation,
+}
+
+impl CompactOperation {
+    pub fn end(self, index: &mut InvertedIndex) -> Result<Option<SegmentId>> {
+        let res = index.end_merge_segments_by_id(self.merge_op, self.entry)?;
+        Ok(res)
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
-struct Meta {
+pub struct Meta {
     segments: Vec<Segment>,
 }
 
@@ -72,6 +101,10 @@ impl Meta {
 
         serde_json::to_writer_pretty(writer, self).unwrap();
     }
+
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
 }
 
 pub struct InnerIndex {
@@ -88,7 +121,7 @@ impl InnerIndex {
         path: P,
         indexer_worker_config: indexer::worker::Config,
     ) -> Result<Self> {
-        let mut index = crate::index::Index::open(path.as_ref().join("index"))?;
+        let mut index = crate::index::Index::open(path.as_ref())?;
         index.prepare_writer()?;
 
         let write_ahead_log = Wal::open(path.as_ref().join("wal"))?;
@@ -127,34 +160,92 @@ impl InnerIndex {
             .delete_segments_by_id(&old_segments)
             .unwrap();
 
-        self.update_meta();
+        self.sync_meta_with_index();
+        self.re_open();
     }
 
-    pub fn compact_segments_by_date(&mut self) {
-        let mut segments_by_date: HashMap<NaiveDate, Vec<SegmentId>> = HashMap::new();
+    pub async fn start_compact_segments_by_date(&self) -> Result<Vec<CompactOperation>> {
+        let segments_to_compact = self.prepare_segments_for_compaction();
+
+        let mut operations = Vec::new();
+
+        for (_, segments) in segments_to_compact {
+            if segments.len() <= 1 {
+                continue;
+            }
+
+            let segment_ids: Vec<SegmentId> = segments.iter().map(|s| s.id).collect();
+
+            let (entry, merge_op) = self
+                .index
+                .inverted_index
+                .start_merge_segments_by_id(&segment_ids)
+                .await?;
+
+            operations.push(CompactOperation {
+                segments,
+                entry,
+                merge_op,
+            });
+        }
+
+        Ok(operations)
+    }
+
+    fn end_compact_segments_by_date(&mut self, operations: Vec<CompactOperation>) -> Result<()> {
+        for op in operations {
+            let newest_creation_date = op.segments.iter().map(|s| s.created).max().unwrap();
+            let segment_ids: Vec<SegmentId> = op.segments.iter().map(|s| s.id).collect();
+
+            if let Ok(Some(new_segment_id)) = op.end(&mut self.index.inverted_index) {
+                self.update_meta_after_compaction(
+                    segment_ids,
+                    new_segment_id,
+                    newest_creation_date,
+                );
+            }
+        }
+
+        self.save_meta();
+        self.re_open();
+
+        Ok(())
+    }
+
+    fn prepare_segments_for_compaction(&self) -> HashMap<NaiveDate, Vec<Segment>> {
+        let mut segments_by_date: HashMap<NaiveDate, Vec<Segment>> = HashMap::new();
 
         for segment in self.meta.segments.clone() {
             segments_by_date
                 .entry(segment.created.date_naive())
                 .or_default()
-                .push(segment.id);
+                .push(segment);
         }
 
-        for (_, segments) in segments_by_date {
-            if segments.len() <= 1 {
-                continue;
-            }
-
-            self.index
-                .inverted_index
-                .merge_segments_by_id(&segments)
-                .unwrap();
-        }
-
-        self.update_meta();
+        segments_by_date
     }
 
-    fn update_meta(&mut self) {
+    fn update_meta_after_compaction(
+        &mut self,
+        old_segment_ids: Vec<SegmentId>,
+        new_segment_id: SegmentId,
+        newest_creation_date: DateTime<Utc>,
+    ) {
+        self.meta
+            .segments
+            .retain(|s| !old_segment_ids.contains(&s.id));
+        self.meta.segments.push(Segment {
+            id: new_segment_id,
+            created: newest_creation_date,
+        });
+    }
+
+    fn re_open(&mut self) {
+        self.index.inverted_index.re_open().unwrap();
+        self.index.prepare_writer().unwrap();
+    }
+
+    fn sync_meta_with_index(&mut self) {
         let segments_in_index: HashSet<_> = self
             .index
             .inverted_index
@@ -194,6 +285,8 @@ impl InnerIndex {
                 created: Utc::now(),
             })
         }
+
+        self.save_meta();
     }
 
     fn save_meta(&self) {
@@ -212,7 +305,8 @@ impl InnerIndex {
             .unwrap();
 
         self.meta = Meta::default();
-        self.save_meta()
+        self.save_meta();
+        self.re_open();
     }
 
     pub fn insert(&mut self, pages: &[IndexableWebpage]) {
@@ -225,6 +319,7 @@ impl InnerIndex {
             .write_ahead_log
             .iter()
             .unwrap()
+            .unique_by(|page| page.url.clone())
             .chunks(BATCH_SIZE)
             .into_iter()
         {
@@ -234,8 +329,10 @@ impl InnerIndex {
             }
         }
         self.index.commit().unwrap();
-        self.update_meta();
+        self.write_ahead_log.clear().unwrap();
+        self.sync_meta_with_index();
         self.has_inserts = false;
+        self.re_open();
     }
 
     pub fn has_inserts(&self) -> bool {
@@ -244,6 +341,10 @@ impl InnerIndex {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn meta(&self) -> &Meta {
+        &self.meta
     }
 }
 
@@ -263,67 +364,70 @@ impl LiveIndex {
         })
     }
 
-    pub fn commit(&self) {
-        futures::executor::block_on(
-            self.inner
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .commit(),
-        );
+    pub async fn commit(&self) {
+        tracing::debug!("committing index");
+        self.inner.write().await.commit().await;
     }
 
-    pub fn prune_segments(&self) {
-        self.inner
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .prune_segments()
+    pub async fn prune_segments(&self) {
+        tracing::debug!("pruning segments");
+        self.inner.write().await.prune_segments()
     }
 
-    pub fn has_inserts(&self) -> bool {
-        self.inner
+    pub async fn has_inserts(&self) -> bool {
+        self.inner.read().await.has_inserts()
+    }
+
+    pub async fn compact_segments_by_date(&self) -> Result<()> {
+        tracing::debug!("compacting segments by date");
+        let operations = self
+            .inner
             .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .has_inserts()
-    }
+            .await
+            .start_compact_segments_by_date()
+            .await?;
 
-    pub fn compact_segments_by_date(&self) {
         self.inner
             .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .compact_segments_by_date()
+            .await
+            .end_compact_segments_by_date(operations)?;
+
+        Ok(())
     }
 
-    pub fn insert(&self, pages: &[IndexableWebpage]) {
+    pub async fn insert(&self, pages: &[IndexableWebpage]) {
+        tracing::debug!("inserting {} pages into index", pages.len());
+        self.inner.write().await.insert(pages)
+    }
+
+    pub async fn read(&self) -> RwLockReadGuard<'_, InnerIndex> {
+        self.inner.read().await
+    }
+
+    pub async fn set_snippet_config(&self, config: SnippetConfig) {
         self.inner
             .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(pages)
-    }
-
-    pub fn read(&self) -> RwLockReadGuard<'_, InnerIndex> {
-        self.inner.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub fn set_snippet_config(&self, config: SnippetConfig) {
-        self.inner
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .await
             .index
             .set_snippet_config(config)
+            .await
     }
 
-    pub fn path(&self) -> PathBuf {
-        self.inner
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .path
-            .to_path_buf()
+    pub async fn path(&self) -> PathBuf {
+        self.inner.read().await.path.to_path_buf()
     }
 
-    pub fn delete_all_pages(&self) {
-        self.inner
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .delete_all_pages();
+    pub async fn delete_all_pages(&self) {
+        self.inner.write().await.delete_all_pages();
+    }
+
+    pub async fn re_open(&self) -> Result<()> {
+        self.inner.write().await.re_open();
+
+        Ok(())
+    }
+
+    pub async fn meta(&self) -> Meta {
+        self.inner.read().await.meta.clone()
     }
 }

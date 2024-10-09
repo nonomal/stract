@@ -34,7 +34,7 @@ use itertools::Itertools;
 
 use super::{
     merge::{MergeNode, MergeSegmentOrd},
-    Compression, EdgeLimit, FullNodeID, NodeDatum, NodeID, SegmentEdge, StoredEdge,
+    Compression, FullNodeID, NodeDatum, NodeID, SegmentEdge, StoredEdge,
 };
 
 pub struct HostDb {
@@ -486,7 +486,22 @@ impl EdgeStore {
         Ok(())
     }
 
-    pub fn get_with_label(&self, node: &NodeID, limit: &EdgeLimit) -> Vec<SegmentEdge<String>> {
+    pub fn degree(&self, node: &NodeID) -> u64 {
+        let node_bytes = node.as_u64().to_be_bytes();
+
+        match self.ranges.edges.get_raw(&node_bytes) {
+            Some(node_range_bytes) => {
+                let range = EdgeRange::deserialize(node_range_bytes.as_bytes());
+                self.edges.slice(usize_range(range.range)).len() as u64
+            }
+            None => 0,
+        }
+    }
+
+    pub fn get_with_label<'a>(
+        &'a self,
+        node: &'a NodeID,
+    ) -> Box<dyn Iterator<Item = SegmentEdge<String>> + Send + Sync + 'a> {
         let node_bytes = node.as_u64().to_be_bytes();
 
         match (
@@ -503,37 +518,34 @@ impl EdgeStore {
                     .map(|r| r.decompress())
                     .flat_map(|block| block.labels.into_iter());
 
-                let labels = limit.apply(labels);
-
                 let edges = self.edges.slice(usize_range(node_range.range));
-                let edges = limit.apply(edges);
 
-                labels
-                    .zip_eq(edges)
-                    .map(|(label, edge)| {
-                        if self.reversed {
-                            SegmentEdge {
-                                from: edge.other,
-                                to: NodeDatum::new(*node, node_range.host_rank),
-                                rel: edge.rel,
-                                label,
-                            }
-                        } else {
-                            SegmentEdge {
-                                from: NodeDatum::new(*node, node_range.host_rank),
-                                to: edge.other,
-                                rel: edge.rel,
-                                label,
-                            }
+                Box::new(labels.zip_eq(edges).map(move |(label, edge)| {
+                    if self.reversed {
+                        SegmentEdge {
+                            from: edge.other,
+                            to: NodeDatum::new(*node, node_range.host_rank),
+                            rel: edge.rel,
+                            label,
                         }
-                    })
-                    .collect()
+                    } else {
+                        SegmentEdge {
+                            from: NodeDatum::new(*node, node_range.host_rank),
+                            to: edge.other,
+                            rel: edge.rel,
+                            label,
+                        }
+                    }
+                }))
             }
-            _ => Vec::new(),
+            _ => Box::new(std::iter::empty()),
         }
     }
 
-    pub fn get_without_label(&self, node: &NodeID, limit: &EdgeLimit) -> Vec<SegmentEdge<()>> {
+    pub fn get_without_label<'a>(
+        &'a self,
+        node: &'a NodeID,
+    ) -> Box<dyn Iterator<Item = SegmentEdge<()>> + Send + Sync + 'a> {
         let node_bytes = node.as_u64().to_be_bytes();
 
         match self.ranges.edges.get_raw(&node_bytes) {
@@ -542,30 +554,25 @@ impl EdgeStore {
 
                 let edges = self.edges.slice(usize_range(edge_range.range));
 
-                let edges = limit.apply(edges);
-
-                edges
-                    .into_iter()
-                    .map(|edge| {
-                        if self.reversed {
-                            SegmentEdge {
-                                from: edge.other,
-                                to: NodeDatum::new(*node, edge_range.host_rank),
-                                rel: edge.rel,
-                                label: (),
-                            }
-                        } else {
-                            SegmentEdge {
-                                from: NodeDatum::new(*node, edge_range.host_rank),
-                                to: edge.other,
-                                rel: edge.rel,
-                                label: (),
-                            }
+                Box::new(edges.into_iter().map(move |edge| {
+                    if self.reversed {
+                        SegmentEdge {
+                            from: edge.other,
+                            to: NodeDatum::new(*node, edge_range.host_rank),
+                            rel: edge.rel,
+                            label: (),
                         }
-                    })
-                    .collect()
+                    } else {
+                        SegmentEdge {
+                            from: NodeDatum::new(*node, edge_range.host_rank),
+                            to: edge.other,
+                            rel: edge.rel,
+                            label: (),
+                        }
+                    }
+                }))
             }
-            _ => Vec::new(),
+            _ => Box::new(std::iter::empty()),
         }
     }
 
@@ -616,12 +623,9 @@ mod tests {
 
     #[test]
     fn test_insert() {
-        let mut kv: EdgeStoreWriter = EdgeStoreWriter::new(
-            crate::gen_temp_path().join("test-segment"),
-            Compression::default(),
-            false,
-            None,
-        );
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut kv: EdgeStoreWriter =
+            EdgeStoreWriter::new(&temp_dir, Compression::default(), false, None);
 
         let e = InsertableEdge {
             from: FullNodeID {
@@ -640,12 +644,12 @@ mod tests {
 
         let store = kv.finalize();
 
-        let edges: Vec<_> = store.get_with_label(&NodeID::from(0_u64), &EdgeLimit::Unlimited);
+        let edges: Vec<_> = store.get_with_label(&NodeID::from(0_u64)).collect();
 
         assert_eq!(edges.len(), 1);
         assert_eq!(&edges[0].to.node(), &SegmentEdge::from(e.clone()).to.node());
 
-        let edges: Vec<_> = store.get_with_label(&NodeID::from(1_u64), &EdgeLimit::Unlimited);
+        let edges: Vec<_> = store.get_with_label(&NodeID::from(1_u64)).collect();
 
         assert_eq!(edges.len(), 0);
 
@@ -656,12 +660,9 @@ mod tests {
 
     #[test]
     fn test_reversed() {
-        let mut kv: EdgeStoreWriter = EdgeStoreWriter::new(
-            crate::gen_temp_path().join("test-segment"),
-            Compression::default(),
-            true,
-            None,
-        );
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut kv: EdgeStoreWriter =
+            EdgeStoreWriter::new(&temp_dir, Compression::default(), true, None);
 
         let e = InsertableEdge {
             from: FullNodeID {
@@ -680,50 +681,19 @@ mod tests {
 
         let store = kv.finalize();
 
-        let edges: Vec<_> = store.get_with_label(&NodeID::from(0_u64), &EdgeLimit::Unlimited);
+        let edges: Vec<_> = store.get_with_label(&NodeID::from(0_u64)).collect();
         assert_eq!(edges.len(), 0);
 
-        let edges: Vec<_> = store.get_with_label(&NodeID::from(1_u64), &EdgeLimit::Unlimited);
+        let edges: Vec<_> = store.get_with_label(&NodeID::from(1_u64)).collect();
         assert_eq!(edges.len(), 1);
         assert_eq!(&edges[0], &SegmentEdge::from(e.clone()));
     }
 
     #[test]
-    fn test_limit() {
-        let mut kv: EdgeStoreWriter = EdgeStoreWriter::new(
-            crate::gen_temp_path().join("test-segment"),
-            Compression::default(),
-            true,
-            None,
-        );
-
-        for i in 0..10 {
-            let e = InsertableEdge {
-                from: FullNodeID {
-                    id: NodeID::from(i as u64),
-                    host: NodeID::from(0_u64),
-                },
-                to: FullNodeID {
-                    id: NodeID::from(1_u64),
-                    host: NodeID::from(0_u64),
-                },
-                label: "test".to_string(),
-                rel: RelFlags::default(),
-            };
-
-            kv.put(e.clone());
-        }
-
-        let store = kv.finalize();
-
-        let edges: Vec<_> = store.get_with_label(&NodeID::from(1_u64), &EdgeLimit::Limit(5));
-        assert_eq!(edges.len(), 5);
-    }
-
-    #[test]
     fn test_edge_ordering() {
+        let temp_dir = crate::gen_temp_dir().unwrap();
         let mut rank_store =
-            speedy_kv::Db::open_or_create(crate::gen_temp_path().join("test-rank-store")).unwrap();
+            speedy_kv::Db::open_or_create(temp_dir.as_ref().join("test-rank-store")).unwrap();
 
         rank_store.insert(NodeID::from(2_u64), 1).unwrap();
         rank_store.insert(NodeID::from(3_u64), 2).unwrap();
@@ -732,7 +702,7 @@ mod tests {
         rank_store.commit().unwrap();
 
         let mut kv: EdgeStoreWriter = EdgeStoreWriter::new(
-            crate::gen_temp_path().join("test-segment"),
+            &temp_dir.as_ref().join("test-segment"),
             Compression::default(),
             true,
             Some(Arc::new(rank_store)),
@@ -783,7 +753,7 @@ mod tests {
 
         let store = kv.finalize();
 
-        let edges: Vec<_> = store.get_with_label(&NodeID::from(0_u64), &EdgeLimit::Unlimited);
+        let edges: Vec<_> = store.get_with_label(&NodeID::from(0_u64)).collect();
 
         assert_eq!(edges.len(), 3);
 
@@ -799,5 +769,32 @@ mod tests {
             Edge::from(edges[2].clone()).from.node(),
             Edge::from(e1.clone()).from.node()
         );
+    }
+
+    #[test]
+    fn test_degree() {
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut kv: EdgeStoreWriter =
+            EdgeStoreWriter::new(&temp_dir, Compression::default(), false, None);
+
+        let e1 = InsertableEdge {
+            from: FullNodeID {
+                id: NodeID::from(1_u64),
+                host: NodeID::from(1_u64),
+            },
+            to: FullNodeID {
+                id: NodeID::from(2_u64),
+                host: NodeID::from(2_u64),
+            },
+            label: "1".to_string(),
+            rel: RelFlags::default(),
+        };
+
+        kv.put(e1.clone());
+
+        let store = kv.finalize();
+
+        assert_eq!(store.degree(&NodeID::from(1_u64)), 1);
+        assert_eq!(store.degree(&NodeID::from(2_u64)), 0);
     }
 }
