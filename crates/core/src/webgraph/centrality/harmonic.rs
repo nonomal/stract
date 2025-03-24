@@ -27,7 +27,7 @@ use tracing::info;
 use crate::{
     hyperloglog::HyperLogLog,
     kahan_sum::KahanSum,
-    webgraph::{EdgeLimit, NodeID, Webgraph},
+    webgraph::{query, EdgeLimit, NodeID, Webgraph},
     webpage::html::links::RelFlags,
 };
 
@@ -36,6 +36,7 @@ const HYPERLOGLOG_COUNTERS: usize = 64;
 pub static SKIPPED_REL: std::sync::LazyLock<RelFlags> = std::sync::LazyLock::new(|| {
     RelFlags::TAG
         | RelFlags::NOFOLLOW
+        | RelFlags::SPONSORED
         | RelFlags::IS_IN_FOOTER
         | RelFlags::IS_IN_NAVIGATION
         | RelFlags::PRIVACY_POLICY
@@ -44,6 +45,7 @@ pub static SKIPPED_REL: std::sync::LazyLock<RelFlags> = std::sync::LazyLock::new
         | RelFlags::LINK_TAG
         | RelFlags::SCRIPT_TAG
         | RelFlags::SAME_ICANN_DOMAIN
+        | RelFlags::UGC
 });
 
 type Counter = BTreeMap<NodeID, HyperLogLog<HYPERLOGLOG_COUNTERS>>;
@@ -55,9 +57,9 @@ fn initialize(
 ) -> u64 {
     let mut num_nodes = 0;
 
-    for node in graph.nodes() {
+    for node in graph.host_nodes() {
         let mut counter = HyperLogLog::default();
-        counter.add(node.as_u64());
+        counter.add_u128(node.as_u128());
 
         counters.old.insert(node, counter);
         centralities.insert(node, KahanSum::default());
@@ -81,14 +83,14 @@ fn update_changed_counters(
 
     exact_changed_nodes.iter().for_each(|changed_node| {
         for edge in graph
-            .raw_outgoing_edges(changed_node, EdgeLimit::Unlimited)
+            .search(&query::ForwardlinksQuery::new(*changed_node).with_limit(EdgeLimit::Unlimited))
+            .unwrap_or_default()
             .into_iter()
-            .filter(|e| !e.rel_flags().intersects(*SKIPPED_REL))
+            .filter(|e| !e.rel_flags.intersects(*SKIPPED_REL))
         {
-            if let (Some(counter_to), Some(counter_from)) = (
-                counters.new.get_mut(&edge.to.node()),
-                counters.old.get(&edge.from.node()),
-            ) {
+            if let (Some(counter_to), Some(counter_from)) =
+                (counters.new.get_mut(&edge.to), counters.old.get(&edge.from))
+            {
                 if counter_to
                     .registers()
                     .iter()
@@ -96,9 +98,9 @@ fn update_changed_counters(
                     .any(|(to, from)| *from > *to)
                 {
                     counter_to.merge(counter_from);
-                    new_changed_nodes.insert(edge.to.node().as_u64());
+                    new_changed_nodes.insert_u128(edge.to.as_u128());
 
-                    new_exact_changed_nodes.insert(edge.to.node());
+                    new_exact_changed_nodes.insert(edge.to);
 
                     has_changes.store(true, Ordering::Relaxed);
                 }
@@ -125,14 +127,13 @@ fn update_all_counters(
     }
 
     graph
-        .edges()
-        .filter(|e| !e.rel_flags().intersects(*SKIPPED_REL))
+        .host_edges()
+        .filter(|e| !e.rel_flags.intersects(*SKIPPED_REL))
         .for_each(|edge| {
-            if changed_nodes.contains(edge.from.node().as_u64()) {
-                if let (Some(counter_to), Some(counter_from)) = (
-                    counters.new.get_mut(&edge.to.node()),
-                    counters.old.get(&edge.from.node()),
-                ) {
+            if changed_nodes.contains_u128(edge.from.as_u128()) {
+                if let (Some(counter_to), Some(counter_from)) =
+                    (counters.new.get_mut(&edge.to), counters.old.get(&edge.from))
+                {
                     if counter_to
                         .registers()
                         .iter()
@@ -140,10 +141,10 @@ fn update_all_counters(
                         .any(|(to, from)| *from > *to)
                     {
                         counter_to.merge(counter_from);
-                        new_changed_nodes.insert(edge.to.node().as_u64());
+                        new_changed_nodes.insert_u128(edge.to.as_u128());
 
                         if let Some(exact_changed_nodes) = &mut exact_changed_nodes {
-                            exact_changed_nodes.insert(edge.to.node());
+                            exact_changed_nodes.insert(edge.to);
                         }
 
                         has_changes.store(true, Ordering::Relaxed);
@@ -219,8 +220,8 @@ fn calculate_centrality(graph: &Webgraph) -> BTreeMap<NodeID, f64> {
 
     let mut changed_nodes = U64BloomFilter::new(num_nodes, 0.05);
 
-    for node in graph.nodes() {
-        changed_nodes.insert(node.as_u64());
+    for node in graph.host_nodes() {
+        changed_nodes.insert_u128(node.as_u128());
     }
 
     info!("Found {} nodes in the graph", num_nodes);
@@ -311,13 +312,15 @@ impl HarmonicCentrality {
 
 #[cfg(test)]
 mod tests {
+    use file_store::temp::TempDir;
+
     use super::*;
     use crate::{
-        webgraph::{Node, WebgraphWriter},
+        webgraph::{Edge, Node, Webgraph},
         webpage::html::links::RelFlags,
     };
 
-    fn test_edges() -> Vec<(Node, Node, String)> {
+    fn test_edges() -> Vec<(Node, Node)> {
         //     ┌────┐
         //     │    │
         // ┌───A◄─┐ │
@@ -329,124 +332,122 @@ mod tests {
         //        │
         //        D
         vec![
-            (Node::from("A"), Node::from("B"), String::new()),
-            (Node::from("B"), Node::from("C"), String::new()),
-            (Node::from("A"), Node::from("C"), String::new()),
-            (Node::from("C"), Node::from("A"), String::new()),
-            (Node::from("D"), Node::from("C"), String::new()),
+            (Node::from("A"), Node::from("B")),
+            (Node::from("B"), Node::from("C")),
+            (Node::from("A"), Node::from("C")),
+            (Node::from("C"), Node::from("A")),
+            (Node::from("D"), Node::from("C")),
         ]
     }
 
-    fn test_graph() -> Webgraph {
-        let mut writer = WebgraphWriter::new(
-            crate::gen_temp_path(),
-            crate::executor::Executor::single_thread(),
-            crate::webgraph::Compression::default(),
-            None,
-        );
+    fn test_graph() -> (Webgraph, TempDir) {
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut graph = Webgraph::builder(temp_dir.as_ref().join("test"), 0u64.into())
+            .open()
+            .unwrap();
 
-        for (from, to, label) in test_edges() {
-            writer.insert(from, to, label, RelFlags::default());
+        for (from, to) in test_edges() {
+            graph.insert(Edge::new_test(from, to)).unwrap();
         }
 
-        writer.finalize()
+        graph.commit().unwrap();
+
+        (graph, temp_dir)
     }
 
     #[test]
     fn host_harmonic_centrality() {
-        let mut writer = WebgraphWriter::new(
-            crate::gen_temp_path(),
-            crate::executor::Executor::single_thread(),
-            crate::webgraph::Compression::default(),
-            None,
-        );
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut graph = Webgraph::builder(temp_dir.as_ref().join("test"), 0u64.into())
+            .open()
+            .unwrap();
 
-        writer.insert(
-            Node::from("A.com/1").into_host(),
-            Node::from("A.com/2").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/1").into_host(),
-            Node::from("A.com/3").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/1").into_host(),
-            Node::from("A.com/4").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/2").into_host(),
-            Node::from("A.com/1").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/2").into_host(),
-            Node::from("A.com/3").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/2").into_host(),
-            Node::from("A.com/4").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/3").into_host(),
-            Node::from("A.com/1").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/3").into_host(),
-            Node::from("A.com/2").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/3").into_host(),
-            Node::from("A.com/4").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/4").into_host(),
-            Node::from("A.com/1").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/4").into_host(),
-            Node::from("A.com/2").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("A.com/4").into_host(),
-            Node::from("A.com/3").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("C.com").into_host(),
-            Node::from("B.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        writer.insert(
-            Node::from("D.com").into_host(),
-            Node::from("B.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/1").into_host(),
+                Node::from("A.com/2").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/1").into_host(),
+                Node::from("A.com/3").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/1").into_host(),
+                Node::from("A.com/4").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/2").into_host(),
+                Node::from("A.com/1").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/2").into_host(),
+                Node::from("A.com/3").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/2").into_host(),
+                Node::from("A.com/4").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/3").into_host(),
+                Node::from("A.com/1").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/3").into_host(),
+                Node::from("A.com/2").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/3").into_host(),
+                Node::from("A.com/4").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/4").into_host(),
+                Node::from("A.com/1").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/4").into_host(),
+                Node::from("A.com/2").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("A.com/4").into_host(),
+                Node::from("A.com/3").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("C.com").into_host(),
+                Node::from("B.com").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("D.com").into_host(),
+                Node::from("B.com").into_host(),
+            ))
+            .unwrap();
 
-        let graph = writer.finalize();
+        graph.commit().unwrap();
 
         let centrality = HarmonicCentrality::calculate(&graph);
 
@@ -458,7 +459,7 @@ mod tests {
 
     #[test]
     fn harmonic_centrality() {
-        let graph = test_graph();
+        let (graph, _temp_dir) = test_graph();
         let centrality = HarmonicCentrality::calculate(&graph);
 
         assert!(
@@ -474,72 +475,52 @@ mod tests {
 
     #[test]
     fn additional_edges_ignored() {
-        let graph = test_graph();
+        let (graph, _temp_dir) = test_graph();
         let centrality = HarmonicCentrality::calculate(&graph);
 
-        let mut other = WebgraphWriter::new(
-            crate::gen_temp_path(),
-            crate::executor::Executor::single_thread(),
-            crate::webgraph::Compression::default(),
-            None,
-        );
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut graph = Webgraph::builder(temp_dir.as_ref().join("test"), 0u64.into())
+            .open()
+            .unwrap();
 
-        for (from, to, label) in test_edges() {
-            other.insert(from, to, label, RelFlags::default());
+        for (from, to) in test_edges() {
+            graph.insert(Edge::new_test(from, to)).unwrap();
         }
 
-        other.insert(
-            Node::from("A"),
-            Node::from("B"),
-            "1".to_string(),
-            RelFlags::default(),
-        );
-        other.commit();
-        other.insert(
-            Node::from("A"),
-            Node::from("B"),
-            "2".to_string(),
-            RelFlags::default(),
-        );
-        other.commit();
-        other.insert(
-            Node::from("A"),
-            Node::from("B"),
-            "3".to_string(),
-            RelFlags::default(),
-        );
-        other.commit();
-        other.insert(
-            Node::from("A"),
-            Node::from("B"),
-            "4".to_string(),
-            RelFlags::default(),
-        );
-        other.commit();
-        other.insert(
-            Node::from("A"),
-            Node::from("B"),
-            "5".to_string(),
-            RelFlags::default(),
-        );
-        other.commit();
-        other.insert(
-            Node::from("A"),
-            Node::from("B"),
-            "6".to_string(),
-            RelFlags::default(),
-        );
-        other.commit();
-        other.insert(
-            Node::from("A"),
-            Node::from("B"),
-            "7".to_string(),
-            RelFlags::default(),
-        );
-        other.commit();
+        graph
+            .insert(Edge::new_test(Node::from("A"), Node::from("B")))
+            .unwrap();
+        graph.commit().unwrap();
+        graph
+            .insert(Edge::new_test(Node::from("A"), Node::from("B")))
+            .unwrap();
+        graph.commit().unwrap();
+        graph
+            .insert(Edge::new_test(Node::from("A"), Node::from("B")))
+            .unwrap();
+        graph.commit().unwrap();
+        graph
+            .insert(Edge::new_test(Node::from("A"), Node::from("B")))
+            .unwrap();
+        graph.commit().unwrap();
+        graph
+            .insert(Edge::new_test(Node::from("A"), Node::from("B")))
+            .unwrap();
+        graph.commit().unwrap();
+        graph
+            .insert(Edge::new_test(Node::from("A"), Node::from("B")))
+            .unwrap();
+        graph.commit().unwrap();
+        graph
+            .insert(Edge::new_test(Node::from("A"), Node::from("B")))
+            .unwrap();
+        graph.commit().unwrap();
+        graph
+            .insert(Edge::new_test(Node::from("A"), Node::from("B")))
+            .unwrap();
+        graph.commit().unwrap();
 
-        let mut graph = other.finalize();
-        graph.optimize_read();
+        graph.optimize_read().unwrap();
 
         let centrality_extra = HarmonicCentrality::calculate(&graph);
 
@@ -548,18 +529,23 @@ mod tests {
 
     #[test]
     fn test_rel_flag_ignored() {
-        let mut graph = WebgraphWriter::new(
-            crate::gen_temp_path(),
-            crate::executor::Executor::single_thread(),
-            crate::webgraph::Compression::default(),
-            None,
-        );
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut graph = Webgraph::builder(temp_dir.as_ref().join("test"), 0u64.into())
+            .open()
+            .unwrap();
 
-        for (from, to, label) in test_edges() {
-            graph.insert(from, to, label, RelFlags::TAG);
+        for (from, to) in test_edges() {
+            graph
+                .insert(Edge {
+                    from,
+                    to,
+                    rel_flags: RelFlags::TAG,
+                    ..Edge::empty()
+                })
+                .unwrap();
         }
 
-        let graph = graph.finalize();
+        graph.commit().unwrap();
 
         let centrality = HarmonicCentrality::calculate(&graph);
 
@@ -568,18 +554,23 @@ mod tests {
 
     #[test]
     fn test_same_icann_domain_ignored() {
-        let mut graph = WebgraphWriter::new(
-            crate::gen_temp_path(),
-            crate::executor::Executor::single_thread(),
-            crate::webgraph::Compression::default(),
-            None,
-        );
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut graph = Webgraph::builder(temp_dir.as_ref().join("test"), 0u64.into())
+            .open()
+            .unwrap();
 
-        for (from, to, label) in test_edges() {
-            graph.insert(from, to, label, RelFlags::SAME_ICANN_DOMAIN);
+        for (from, to) in test_edges() {
+            graph
+                .insert(Edge {
+                    from,
+                    to,
+                    rel_flags: RelFlags::SAME_ICANN_DOMAIN,
+                    ..Edge::empty()
+                })
+                .unwrap();
         }
 
-        let graph = graph.finalize();
+        graph.commit().unwrap();
 
         let centrality = HarmonicCentrality::calculate(&graph);
 

@@ -48,10 +48,10 @@ pub enum CentralityMapper {
 impl CentralityMapper {
     /// get old values from prev dht using edge.from where edge.from in changed_nodes
     fn get_old_counters(
-        batch: &[webgraph::Edge<()>],
+        batch: &[webgraph::SmallEdge],
         dht: &DhtConn<CentralityTables>,
     ) -> BTreeMap<webgraph::NodeID, HyperLogLog<64>> {
-        let nodes: Vec<_> = batch.iter().map(|edge| edge.from.node()).collect();
+        let nodes: Vec<_> = batch.iter().map(|edge| edge.from).collect();
 
         if nodes.is_empty() {
             return BTreeMap::new();
@@ -66,7 +66,7 @@ impl CentralityMapper {
                 .iter()
                 .map(|node| {
                     let mut hll = HyperLogLog::default();
-                    hll.add(node.as_u64());
+                    hll.add_u128(node.as_u128());
                     (*node, hll)
                 })
                 .collect(),
@@ -77,7 +77,7 @@ impl CentralityMapper {
                 .iter()
                 .map(|node| {
                     let mut hll = HyperLogLog::default();
-                    hll.add(node.as_u64());
+                    hll.add_u128(node.as_u128());
                     (*node, hll)
                 })
                 .collect(),
@@ -87,7 +87,7 @@ impl CentralityMapper {
     /// upsert old edge.from `old_counters` into edge.to in dht.next,
     /// thereby updating their hyperloglog counters
     fn update_counters(
-        batch: &[webgraph::Edge<()>],
+        batch: &[webgraph::SmallEdge],
         dht: &DhtConn<CentralityTables>,
     ) -> Vec<(webgraph::NodeID, UpsertAction)> {
         let old_counters = Self::get_old_counters(batch, dht);
@@ -95,12 +95,9 @@ impl CentralityMapper {
         let updates: Vec<_> = batch
             .iter()
             .map(|edge| {
-                let mut counter = old_counters
-                    .get(&edge.from.node())
-                    .cloned()
-                    .unwrap_or_default();
-                counter.add(edge.from.node().as_u64());
-                (edge.to.node(), counter)
+                let mut counter = old_counters.get(&edge.from).cloned().unwrap_or_default();
+                counter.add_u128(edge.from.as_u128());
+                (edge.to, counter)
             })
             .collect();
 
@@ -122,14 +119,14 @@ impl CentralityMapper {
 
         for (node, upsert_res) in changes {
             if let UpsertAction::Merged = upsert_res {
-                new_changed_nodes.insert(node.as_u64());
+                new_changed_nodes.insert_u128(node.as_u128());
             }
         }
     }
 
     fn update_dht(
         worker: &CentralityWorker,
-        batch: &[webgraph::Edge<()>],
+        batch: &[webgraph::SmallEdge],
         new_changed_nodes: &Mutex<U64BloomFilter>,
         dht: &DhtConn<CentralityTables>,
     ) {
@@ -226,8 +223,8 @@ impl CentralityMapper {
             let mut batch = Vec::with_capacity(batch_size);
             let mut changed_nodes = worker.changed_nodes().lock().unwrap();
 
-            for node in worker.graph().nodes() {
-                changed_nodes.insert(node.as_u64());
+            for node in worker.graph().host_nodes() {
+                changed_nodes.insert_u128(node.as_u128());
                 batch.push(node);
                 if batch.len() >= batch_size {
                     let update_batch = batch.clone();
@@ -271,9 +268,9 @@ impl CentralityMapper {
 
             for edge in worker
                 .graph()
-                .edges()
-                .filter(|e| !e.rel_flags().intersects(*SKIPPED_REL))
-                .filter(|e| changed_nodes.contains(e.from.node().as_u64()))
+                .host_edges()
+                .filter(|e| !e.rel_flags.intersects(*SKIPPED_REL))
+                .filter(|e| changed_nodes.contains_u128(e.from.as_u128()))
             {
                 batch.push(edge);
                 if batch.len() >= batch_size {
@@ -316,8 +313,9 @@ impl CentralityMapper {
             let changed_nodes = worker.changed_nodes().lock().unwrap();
             for node in worker
                 .graph()
-                .nodes()
-                .filter(|n| changed_nodes.contains(n.as_u64()))
+                .host_nodes()
+                .into_iter()
+                .filter(|n| changed_nodes.contains_u128(n.as_u128()))
             {
                 batch.push(node);
                 if batch.len() >= batch_size {

@@ -1,3 +1,7 @@
+use std::cmp::Ordering;
+use std::collections::binary_heap::PeekMut;
+use std::collections::BinaryHeap;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use crate::columnar::{
@@ -18,7 +22,7 @@ use crate::indexer::SegmentSerializer;
 use crate::postings::{InvertedIndexSerializer, Postings, SegmentPostings};
 use crate::schema::{value_type_to_column_type, Field, FieldType, Schema};
 use crate::store::StoreWriter;
-use crate::termdict::{TermMerger, TermOrdinal};
+use crate::termdict::TermMerger;
 use crate::{
     DocAddress, DocId, IndexSettings, IndexSortByField, InvertedIndexReader, Order, SegmentOrdinal,
 };
@@ -399,25 +403,21 @@ impl IndexMerger {
         let mut positions_buffer: Vec<u32> = Vec::with_capacity(1_000);
         let mut delta_computer = DeltaComputer::new();
 
-        let mut max_term_ords: Vec<TermOrdinal> = Vec::new();
-
         let field_readers: Vec<Arc<InvertedIndexReader>> = self
             .readers
             .iter()
             .map(|reader| reader.inverted_index(indexed_field))
             .collect::<crate::Result<Vec<_>>>()?;
 
-        let mut field_term_streams = Vec::new();
+        let mut field_term_streams = Vec::with_capacity(field_readers.len());
         for field_reader in &field_readers {
             let terms = field_reader.terms();
             field_term_streams.push(terms.stream()?);
-            max_term_ords.push(terms.num_terms() as u64);
         }
 
         let mut merged_terms = TermMerger::new(field_term_streams);
 
         // map from segment doc ids to the resulting merged segment doc id.
-
         let mut merged_doc_id_map: Vec<Vec<Option<DocId>>> = self
             .readers
             .iter()
@@ -459,11 +459,10 @@ impl IndexMerger {
                          indexed. Have you modified the schema?",
         );
 
-        let mut segment_postings_containing_the_term: Vec<(usize, SegmentPostings)> = vec![];
-        let mut doc_id_and_positions = vec![];
-
         while merged_terms.advance() {
-            segment_postings_containing_the_term.clear();
+            let mut segment_postings_containing_the_term: Vec<(usize, SegmentPostings)> =
+                Vec::new();
+
             let term_bytes: &[u8] = merged_terms.key();
 
             let mut total_doc_freq = 0;
@@ -494,12 +493,14 @@ impl IndexMerger {
             assert!(!segment_postings_containing_the_term.is_empty());
 
             let has_term_freq = {
-                let has_term_freq = !segment_postings_containing_the_term[0]
+                let has_term_freq = !segment_postings_containing_the_term
+                    .first()
+                    .unwrap()
                     .1
                     .block_cursor
                     .freqs()
                     .is_empty();
-                for (_, postings) in &segment_postings_containing_the_term[1..] {
+                for (_, postings) in segment_postings_containing_the_term.iter().skip(1) {
                     // This may look at a strange way to test whether we have term freq or not.
                     // With JSON object, the schema is not sufficient to know whether a term
                     // has its term frequency encoded or not:
@@ -528,59 +529,36 @@ impl IndexMerger {
 
             // We can now serialize this postings, by pushing each document to the
             // postings serializer.
-            for (segment_ord, mut segment_postings) in
-                segment_postings_containing_the_term.drain(..)
-            {
-                let old_to_new_doc_id = &merged_doc_id_map[segment_ord];
 
-                let mut doc = segment_postings.doc();
-                while doc != TERMINATED {
-                    // deleted doc are skipped as they do not have a `remapped_doc_id`.
-                    if let Some(remapped_doc_id) = old_to_new_doc_id[doc as usize] {
-                        // we make sure to only write the term if
-                        // there is at least one document.
-                        let term_freq = if has_term_freq {
-                            segment_postings.positions(&mut positions_buffer);
-                            segment_postings.term_freq()
-                        } else {
-                            // The positions_buffer may contain positions from the previous term
-                            // Existence of positions depend on the value type in JSON fields.
-                            // https://github.com/quickwit-oss/tantivy/issues/2283
-                            positions_buffer.clear();
-                            0u32
-                        };
+            let mut postings_merger =
+                PostingsMerger::new(segment_postings_containing_the_term, &merged_doc_id_map);
 
-                        // if doc_id_mapping exists, the doc_ids are reordered, they are
-                        // not just stacked. The field serializer expects monotonically increasing
-                        // doc_ids, so we collect and sort them first, before writing.
-                        //
-                        // I think this is not strictly necessary, it would be possible to
-                        // avoid the loading into a vec via some form of kmerge, but then the merge
-                        // logic would deviate much more from the stacking case (unsorted index)
-                        if !doc_id_mapping.is_trivial() {
-                            doc_id_and_positions.push((
-                                remapped_doc_id,
-                                term_freq,
-                                positions_buffer.to_vec(),
-                            ));
-                        } else {
-                            let delta_positions = delta_computer.compute_delta(&positions_buffer);
-                            field_serializer.write_doc(remapped_doc_id, term_freq, delta_positions);
-                        }
-                    }
-
-                    doc = segment_postings.advance();
+            // Each segment_postings is already sorted by their new doc_id's
+            // (if a new_doc_id(a) < new_doc_id(b), then old_doc_id(a) < old_doc_id(b)).
+            // We can therefore just iterate over the doc_id_mapping and write the term for each
+            // document.
+            while let Some(mut segment) = postings_merger.next() {
+                if segment.new_doc_id == TERMINATED {
+                    continue;
                 }
-            }
-            if !doc_id_mapping.is_trivial() {
-                doc_id_and_positions.sort_unstable_by_key(|&(doc_id, _, _)| doc_id);
 
-                for (doc_id, term_freq, positions) in &doc_id_and_positions {
-                    let delta_positions = delta_computer.compute_delta(positions);
-                    field_serializer.write_doc(*doc_id, *term_freq, delta_positions);
-                }
-                doc_id_and_positions.clear();
+                // we make sure to only write the term if
+                // there is at least one document.
+                let term_freq = if has_term_freq {
+                    segment.postings.positions(&mut positions_buffer);
+                    segment.postings.term_freq()
+                } else {
+                    // The positions_buffer may contain positions from the previous term
+                    // Existence of positions depend on the value type in JSON fields.
+                    // https://github.com/quickwit-oss/tantivy/issues/2283
+                    positions_buffer.clear();
+                    0u32
+                };
+
+                let delta_positions = delta_computer.compute_delta(&positions_buffer);
+                field_serializer.write_doc(segment.new_doc_id, term_freq, delta_positions);
             }
+
             // closing the term.
             field_serializer.close_term()?;
         }
@@ -698,6 +676,104 @@ impl IndexMerger {
     }
 }
 
+struct SegmentPostingsWithNewDocId {
+    postings: SegmentPostings,
+    new_doc_id: DocId,
+    segment_ord: usize,
+}
+
+impl PartialEq for SegmentPostingsWithNewDocId {
+    fn eq(&self, other: &Self) -> bool {
+        self.new_doc_id == other.new_doc_id
+    }
+}
+
+impl Eq for SegmentPostingsWithNewDocId {}
+
+impl PartialOrd for SegmentPostingsWithNewDocId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SegmentPostingsWithNewDocId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.new_doc_id.cmp(&other.new_doc_id).reverse()
+    }
+}
+
+struct PeekSegmentPostingsWithNewDocId<'a> {
+    segment: PeekMut<'a, SegmentPostingsWithNewDocId>,
+    doc_id_mapping: &'a [Option<DocId>],
+}
+
+impl DerefMut for PeekSegmentPostingsWithNewDocId<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.segment
+    }
+}
+
+impl Deref for PeekSegmentPostingsWithNewDocId<'_> {
+    type Target = SegmentPostingsWithNewDocId;
+
+    fn deref(&self) -> &Self::Target {
+        &self.segment
+    }
+}
+
+impl Drop for PeekSegmentPostingsWithNewDocId<'_> {
+    fn drop(&mut self) {
+        self.segment.postings.advance();
+        self.segment.new_doc_id = if self.segment.postings.doc() == TERMINATED {
+            TERMINATED
+        } else {
+            self.doc_id_mapping[self.segment.postings.doc() as usize].unwrap_or(TERMINATED)
+        };
+    }
+}
+
+struct PostingsMerger<'a> {
+    postings: BinaryHeap<SegmentPostingsWithNewDocId>,
+    doc_id_mapping: &'a [Vec<Option<DocId>>],
+}
+
+impl<'a> PostingsMerger<'a> {
+    fn new(
+        postings: Vec<(usize, SegmentPostings)>,
+        doc_id_mapping: &'a [Vec<Option<DocId>>],
+    ) -> Self {
+        let postings: BinaryHeap<_> = postings
+            .into_iter()
+            .map(|(segment_ord, postings)| SegmentPostingsWithNewDocId {
+                new_doc_id: doc_id_mapping[segment_ord][postings.doc() as usize]
+                    .unwrap_or(TERMINATED),
+                postings,
+                segment_ord,
+            })
+            .collect();
+
+        Self {
+            postings,
+            doc_id_mapping,
+        }
+    }
+
+    fn next(&mut self) -> Option<PeekSegmentPostingsWithNewDocId<'_>> {
+        let min_postings = self.postings.peek_mut()?;
+
+        if min_postings.new_doc_id == TERMINATED {
+            return None;
+        }
+
+        let mapping = self.doc_id_mapping[min_postings.segment_ord].as_slice();
+
+        Some(PeekSegmentPostingsWithNewDocId {
+            segment: min_postings,
+            doc_id_mapping: mapping,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -707,12 +783,14 @@ mod tests {
         BytesColumnFieldTestCollector, ColumnFieldTestCollector, TEST_COLLECTOR_WITH_SCORE,
     };
     use crate::index::{Index, SegmentId};
+    use crate::indexer::merger::PostingsMerger;
+    use crate::postings::SegmentPostings;
     use crate::query::{BooleanQuery, EnableScoring, Scorer, TermQuery};
     use crate::schema::{
         IndexRecordOption, TantivyDocument, Term, TextFieldIndexing, Value, INDEXED, TEXT,
     };
     use crate::time::OffsetDateTime;
-    use crate::{assert_nearly_equals, schema, DateTime, DocAddress, DocSet, IndexWriter};
+    use crate::{assert_nearly_equals, schema, DateTime, DocAddress, DocId, DocSet, IndexWriter};
 
     #[test]
     fn test_index_merger_no_deletes() -> crate::Result<()> {
@@ -868,6 +946,33 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_postings_merger() -> crate::Result<()> {
+        let a = SegmentPostings::create_from_docs(&[1, 5, 7]);
+        let b = SegmentPostings::create_from_docs(&[3, 4]);
+        let c = SegmentPostings::create_from_docs(&[2, 6]);
+        let doc_id_mapping = vec![
+            vec![None, Some(1), None, None, None, Some(5), None, Some(7)],
+            vec![None, None, None, Some(3), Some(4), None, None, None],
+            vec![None, None, Some(2), None, None, None, Some(6), None],
+        ];
+
+        let mut merger = PostingsMerger::new(vec![(0, a), (1, b), (2, c)], &doc_id_mapping);
+
+        let mut res = Vec::<(DocId, usize)>::new();
+
+        while let Some(peek) = merger.next() {
+            res.push((peek.new_doc_id, peek.segment_ord));
+        }
+
+        assert_eq!(
+            res,
+            vec![(1, 0), (2, 2), (3, 1), (4, 1), (5, 0), (6, 2), (7, 0)]
+        );
+
         Ok(())
     }
 

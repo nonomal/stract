@@ -16,6 +16,8 @@
 
 pub mod defaults;
 
+pub use web_spell::CorrectionConfig;
+
 use super::Result;
 use crate::ampc::dht;
 use crate::distributed::member::ShardId;
@@ -23,6 +25,39 @@ use crate::distributed::member::ShardId;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::Duration;
+
+pub fn parse_duration<'de, D: serde::de::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Duration, D::Error> {
+    let err = <D::Error as serde::de::Error>::custom;
+    let s: String = serde::de::Deserialize::deserialize(deserializer)?;
+    let num_part = s.trim_end_matches(|c: char| !c.is_numeric());
+    let suffix = &s[num_part.len()..];
+    let num: u64 = num_part
+        .parse()
+        .map_err(|_| err("invalid number".to_string()))?;
+
+    let ret = match suffix.trim() {
+        "s" => Duration::from_secs(num),
+        "sec" => Duration::from_secs(num),
+        "secs" => Duration::from_secs(num),
+        "ms" => Duration::from_millis(num),
+        "millis" => Duration::from_millis(num),
+        "milliseconds" => Duration::from_millis(num),
+        "m" => Duration::from_secs(num * 60),
+        "mins" => Duration::from_secs(num * 60),
+        "minutes" => Duration::from_secs(num * 60),
+        "h" => Duration::from_secs(num * 60 * 60),
+        "hours" => Duration::from_secs(num * 60 * 60),
+        "d" => Duration::from_secs(num * 24 * 60 * 60),
+        "day" => Duration::from_secs(num * 24 * 60 * 60),
+        "days" => Duration::from_secs(num * 24 * 60 * 60),
+        other => return Err(err(format!("invalid suffix {other}"))),
+    };
+    Ok(ret)
+}
 
 #[derive(Debug, serde::Deserialize, Clone)]
 pub struct IndexerConfig {
@@ -64,14 +99,15 @@ pub struct IndexerDualEncoderConfig {
 
 #[derive(Debug, serde::Deserialize, Clone)]
 pub struct WebgraphConstructConfig {
-    pub host_graph_base_path: Option<String>,
-    pub page_graph_base_path: Option<String>,
+    pub graph_base_path: String,
+    pub shard: ShardId,
+    pub host_centrality_store_path: String,
+    pub host_rank_store_path: String,
     pub warc_source: WarcSource,
     pub limit_warc_files: Option<usize>,
     pub skip_warc_files: Option<usize>,
     pub batch_size: Option<usize>,
     pub canonical_index_path: Option<String>,
-    pub host_centrality_rank_store_path: Option<String>,
 
     #[serde(default = "defaults::Webgraph::merge_all_segments")]
     pub merge_all_segments: bool,
@@ -220,6 +256,12 @@ pub struct ApiSpellCheck {
     #[serde(default)]
     pub correction_config: CorrectionConfig,
 }
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct QueryStoreConfig {
+    pub host: String,
+    pub username: String,
+    pub password: String,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct ApiConfig {
@@ -229,8 +271,7 @@ pub struct ApiConfig {
     pub lambda_model_path: Option<String>,
     pub dual_encoder_model_path: Option<String>,
     pub bangs_path: Option<String>,
-    pub query_store_db_host: Option<String>,
-    pub cluster_id: String,
+    pub query_store_db: Option<QueryStoreConfig>,
     pub gossip_seed_nodes: Option<Vec<SocketAddr>>,
     pub gossip_addr: SocketAddr,
 
@@ -299,10 +340,9 @@ impl Default for SnippetConfig {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct SearchServerConfig {
-    pub cluster_id: String,
     pub gossip_seed_nodes: Option<Vec<SocketAddr>>,
     pub gossip_addr: SocketAddr,
-    pub shard: ShardId,
+    pub shard: u64,
     pub index_path: String,
     pub linear_model_path: Option<String>,
     pub dual_encoder_model_path: Option<String>,
@@ -315,9 +355,24 @@ pub struct SearchServerConfig {
     pub snippet: SnippetConfig,
 }
 
+impl From<LiveIndexConfig> for SearchServerConfig {
+    fn from(config: LiveIndexConfig) -> Self {
+        Self {
+            host: config.search_host,
+            gossip_seed_nodes: config.gossip_seed_nodes,
+            gossip_addr: config.gossip_addr,
+            shard: config.shard_id,
+            index_path: config.index_path,
+            linear_model_path: config.linear_model_path,
+            dual_encoder_model_path: config.lambda_model_path,
+            collector: config.collector,
+            snippet: config.snippet,
+        }
+    }
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct EntitySearchServerConfig {
-    pub cluster_id: String,
     pub gossip_seed_nodes: Option<Vec<SocketAddr>>,
     pub gossip_addr: SocketAddr,
     pub index_path: String,
@@ -367,6 +422,100 @@ pub struct CrawlerConfig {
     pub router_hosts: Vec<String>,
 }
 
+#[cfg(test)]
+impl CrawlerConfig {
+    pub fn for_tests() -> Self {
+        Self {
+            num_worker_threads: 1,
+            user_agent: UserAgent {
+                full: "test".to_string(),
+                token: "test".to_string(),
+            },
+            robots_txt_cache_sec: defaults::Crawler::robots_txt_cache_sec(),
+            min_politeness_factor: defaults::Crawler::min_politeness_factor(),
+            start_politeness_factor: defaults::Crawler::start_politeness_factor(),
+            min_crawl_delay_ms: defaults::Crawler::min_crawl_delay_ms(),
+            max_crawl_delay_ms: defaults::Crawler::max_crawl_delay_ms(),
+            max_politeness_factor: defaults::Crawler::max_politeness_factor(),
+            max_url_slowdown_retry: defaults::Crawler::max_url_slowdown_retry(),
+            timeout_seconds: defaults::Crawler::timeout_seconds(),
+            s3: S3Config {
+                bucket: "".to_string(),
+                folder: "".to_string(),
+                access_key: "".to_string(),
+                secret_key: "".to_string(),
+                endpoint: "".to_string(),
+            },
+            router_hosts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DailyLiveIndexCrawlerBudget {
+    #[serde(default = "defaults::LiveCrawler::blogs_budget")]
+    pub blogs: u64,
+    #[serde(default = "defaults::LiveCrawler::news_budget")]
+    pub news: u64,
+    #[serde(default = "defaults::LiveCrawler::remaining_budget")]
+    pub remaining: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CheckIntervals {
+    #[serde(
+        deserialize_with = "parse_duration",
+        default = "defaults::LiveCrawler::feeds_crawl_interval"
+    )]
+    pub feeds: Duration,
+    #[serde(
+        deserialize_with = "parse_duration",
+        default = "defaults::LiveCrawler::sitemap_crawl_interval"
+    )]
+    pub sitemap: Duration,
+    #[serde(
+        deserialize_with = "parse_duration",
+        default = "defaults::LiveCrawler::frontpage_crawl_interval"
+    )]
+    pub frontpage: Duration,
+}
+
+impl Default for CheckIntervals {
+    fn default() -> Self {
+        Self {
+            feeds: defaults::LiveCrawler::feeds_crawl_interval(),
+            sitemap: defaults::LiveCrawler::sitemap_crawl_interval(),
+            frontpage: defaults::LiveCrawler::frontpage_crawl_interval(),
+        }
+    }
+}
+
+impl Default for DailyLiveIndexCrawlerBudget {
+    fn default() -> Self {
+        Self {
+            blogs: defaults::LiveCrawler::blogs_budget(),
+            news: defaults::LiveCrawler::news_budget(),
+            remaining: defaults::LiveCrawler::remaining_budget(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LiveCrawlerConfig {
+    pub crawled_db_path: PathBuf,
+    pub gossip: GossipConfig,
+    pub site_stats_path: PathBuf,
+    pub host_centrality_path: PathBuf,
+    pub user_agent: UserAgent,
+    pub num_worker_threads: usize,
+    #[serde(default)]
+    pub check_intervals: CheckIntervals,
+    #[serde(default)]
+    pub daily_budget: DailyLiveIndexCrawlerBudget,
+    #[serde(default = "defaults::LiveCrawler::init_crawl_db")]
+    pub init_crawl_db: bool,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct CrawlRouterConfig {
     pub host: SocketAddr,
@@ -413,9 +562,7 @@ pub struct WebgraphServerConfig {
     pub host: SocketAddr,
     pub shard: ShardId,
     pub graph_path: String,
-    pub granularity: WebgraphGranularity,
 
-    pub cluster_id: String,
     pub gossip_seed_nodes: Option<Vec<SocketAddr>>,
     pub gossip_addr: SocketAddr,
 }
@@ -454,6 +601,7 @@ pub struct CrawlPlannerDomainBoost {
 pub struct CrawlPlannerConfig {
     pub host_harmonic_path: String,
     pub page_harmonic_path: String,
+    pub host_centrality_rank_store_path: String,
     pub output_path: String,
 
     pub num_job_queues: usize,
@@ -472,61 +620,23 @@ pub struct CrawlPlannerConfig {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct LiveIndexConfig {
-    // crawler
-    pub user_agent: UserAgent,
-    #[serde(default = "defaults::Crawler::robots_txt_cache_sec")]
-    pub robots_txt_cache_sec: u64,
-    #[serde(default = "defaults::Crawler::min_politeness_factor")]
-    pub min_politeness_factor: u32,
-    #[serde(default = "defaults::Crawler::start_politeness_factor")]
-    pub start_politeness_factor: u32,
-    #[serde(default = "defaults::Crawler::min_crawl_delay_ms")]
-    pub min_crawl_delay_ms: u64,
-    #[serde(default = "defaults::Crawler::max_crawl_delay_ms")]
-    pub max_crawl_delay_ms: u64,
-    #[serde(default = "defaults::Crawler::max_politeness_factor")]
-    pub max_politeness_factor: u32,
-    #[serde(default = "defaults::Crawler::max_url_slowdown_retry")]
-    pub max_url_slowdown_retry: u8,
-    #[serde(default = "defaults::Crawler::timeout_seconds")]
-    pub timeout_seconds: u64,
-
-    // indexer
     pub host_centrality_store_path: String,
     pub page_centrality_store_path: Option<String>,
     pub safety_classifier_path: Option<String>,
     pub host_centrality_threshold: Option<f64>,
     pub minimum_clean_words: Option<usize>,
-
-    // search
-    pub cluster_id: String,
     pub gossip_seed_nodes: Option<Vec<SocketAddr>>,
     pub gossip_addr: SocketAddr,
-    pub shard_id: ShardId,
+    pub shard_id: u64,
     pub index_path: String,
     pub linear_model_path: Option<String>,
     pub lambda_model_path: Option<String>,
     pub host: SocketAddr,
+    pub search_host: SocketAddr,
     #[serde(default)]
     pub collector: CollectorConfig,
     #[serde(default)]
     pub snippet: SnippetConfig,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
-pub struct LiveIndexSchedulerConfig {
-    pub schedule_path: String,
-    pub feed_index_path: String,
-    pub host_centrality_store_path: String,
-    pub host_graph_path: String,
-    pub num_splits: u64,
-}
-#[derive(Debug, serde::Deserialize, Clone)]
-pub struct FeedIndexingConfig {
-    pub output_path: String,
-    pub warc_source: WarcSource,
-    pub limit_warc_files: Option<usize>,
-    pub skip_warc_files: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, Clone)]
@@ -548,36 +658,8 @@ pub struct SiteStatsConfig {
     pub skip_warc_files: Option<usize>,
 }
 
-#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
-pub struct CorrectionConfig {
-    /// The probability that a word is misspelled
-    #[serde(default = "defaults::Correction::misspelled_prob")]
-    pub misspelled_prob: f64,
-
-    /// Lambda in eq. 2 (http://static.googleusercontent.com/media/research.google.com/en/us/pubs/archive/36180.pdf)
-    #[serde(default = "defaults::Correction::lm_prob_weight")]
-    pub lm_prob_weight: f64,
-
-    /// The threshold that the difference between the log probability of the best
-    /// correction and the observed word must be above for the word to be
-    /// corrected
-    #[serde(default = "defaults::Correction::correction_threshold")]
-    pub correction_threshold: f64,
-}
-
-impl Default for CorrectionConfig {
-    fn default() -> Self {
-        Self {
-            misspelled_prob: defaults::Correction::misspelled_prob(),
-            lm_prob_weight: defaults::Correction::lm_prob_weight(),
-            correction_threshold: defaults::Correction::correction_threshold(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct GossipConfig {
-    pub cluster_id: String,
     pub seed_nodes: Option<Vec<SocketAddr>>,
     pub addr: SocketAddr,
 }
@@ -599,7 +681,24 @@ pub struct HarmonicCoordinatorConfig {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct ShortestPathCoordinatorConfig {
+    pub source: String,
+    pub gossip: GossipConfig,
+    pub host: SocketAddr,
+    pub output_path: String,
+    pub max_distance: Option<u64>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct HarmonicWorkerConfig {
+    pub gossip: GossipConfig,
+    pub shard: ShardId,
+    pub graph_path: String,
+    pub host: SocketAddr,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct ShortestPathWorkerConfig {
     pub gossip: GossipConfig,
     pub shard: ShardId,
     pub graph_path: String,
@@ -617,17 +716,6 @@ pub struct ApproxHarmonicCoordinatorConfig {
 
     #[serde(default = "defaults::ApproxHarmonic::max_distance")]
     pub max_distance: u8,
-
-    #[serde(default = "defaults::ApproxHarmonic::save_centralities_with_zero")]
-    pub save_centralities_with_zero: bool,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct ApproxHarmonicWorkerConfig {
-    pub gossip: GossipConfig,
-    pub shard: ShardId,
-    pub graph_path: String,
-    pub host: SocketAddr,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -636,4 +724,13 @@ pub struct CanonicalIndexConfig {
     pub warc_source: WarcSource,
     pub limit_warc_files: Option<usize>,
     pub skip_warc_files: Option<usize>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct HarmonicNearestSeedConfig {
+    pub gossip: GossipConfig,
+    pub original_centrality_path: PathBuf,
+    pub output_path: PathBuf,
+    #[serde(default = "defaults::HarmonicNearestSeed::discount_factor")]
+    pub discount_factor: f64,
 }

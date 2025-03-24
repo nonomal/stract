@@ -2,10 +2,7 @@
   <img src="assets/big-logo.svg" height="120" />
   <br />
   <br />
-  <a target="_blank" href="https://docs.stract.com">
-    <img src="https://img.shields.io/badge/overview-docs-0b7bff?labelColor=white" style="max-width: 100%;">
-  </a>
-  <a target="_blank" href="https://stract.com/beta/api/docs">
+  <a target="_blank" href="https://docs.stract.com/">
     <img src="https://img.shields.io/badge/api-docs-0b7bff?labelColor=white" style="max-width: 100%;">
   </a>
   <a target="_blank" href="https://stract.com/webmasters">
@@ -44,11 +41,11 @@ We recommend everyone to use the hosted version at [stract.com](https://stract.c
 
 # ‍💼 License
 
-Stract is offered under the terms defined under the [LICENSE.md](LICENSE.md) file.
+Stract is offered under the terms defined under the [LICENSE.md](LICENSE.md) file unless otherwise specified in the relevant subdirectory.
 
 # 📬 Contact
 
-You can contact us at [hello@stract.com](mailto:hello@stract.com) or come hang out in our [Discord](https://discord.gg/BmzKHffWJM) or [Matrix](https://matrix.to/#/#stract:matrix.org) server.
+You can contact us at [hello@stract.com](mailto:hello@stract.com) or open an [issue](https://github.com/StractOrg/stract/issues)/[discussion](https://github.com/StractOrg/stract/discussions) here on GitHub.
 
 # 🏆 Thank you!
 
@@ -59,7 +56,7 @@ We truly stand on the shoulders of giants and this project would not have been e
 
 # 💰 Funding
 
-This project is currently funded through [NGI0 Entrust](https://nlnet.nl/entrust), a fund established by [NLnet](https://nlnet.nl) with financial support from the European Commission's [Next Generation Internet](https://ngi.eu) program. Learn more at the [NLnet project page](https://nlnet.nl/project/Stract).
+This project was previously funded through [NGI0 Entrust](https://nlnet.nl/entrust), a fund established by [NLnet](https://nlnet.nl) with financial support from the European Commission's [Next Generation Internet](https://ngi.eu) program. Learn more at the [NLnet project page](https://nlnet.nl/project/Stract).
 
 <div>
   <a href="https://nlnet.nl"><img align=center src="assets/nlnet/banner.png" alt="NLnet foundation logo" width="20%" /></a>

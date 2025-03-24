@@ -17,7 +17,7 @@
 use tokio::fs::File;
 use tokio::io;
 use tokio_stream::StreamExt;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::config::{
     defaults, IndexerConfig, IndexerDualEncoderConfig, IndexerGraphConfig, LocalConfig,
@@ -73,7 +73,7 @@ fn download_files() {
 }
 
 fn build_spellchecker() -> Result<()> {
-    debug!("Building spellchecker");
+    info!("Building spellchecker");
     let spellchecker_path = Path::new(DATA_PATH).join("web_spell");
 
     if !spellchecker_path.exists() {
@@ -97,16 +97,11 @@ fn build_spellchecker() -> Result<()> {
 }
 
 fn create_webgraph() -> Result<()> {
-    debug!("Creating webgraph");
-    let out_path_host = Path::new(DATA_PATH).join("webgraph_host");
-    let out_path_page = Path::new(DATA_PATH).join("webgraph_page");
+    info!("Creating webgraph");
+    let out_path = Path::new(DATA_PATH).join("webgraph");
 
-    if out_path_host.exists() {
-        std::fs::remove_dir_all(&out_path_host)?;
-    }
-
-    if out_path_page.exists() {
-        std::fs::remove_dir_all(&out_path_page)?;
+    if out_path.exists() {
+        std::fs::remove_dir_all(&out_path)?;
     }
 
     let warc_path = Path::new(DATA_PATH).join("sample.warc.gz");
@@ -120,38 +115,36 @@ fn create_webgraph() -> Result<()> {
     };
 
     let mut worker = webgraph::WebgraphWorker {
-        host_graph: Some(webgraph::open_host_graph_writer(&out_path_host, None)),
-        page_graph: Some(webgraph::open_page_graph_writer(&out_path_page, None)),
+        graph: crate::webgraph::Webgraph::open(&out_path, 0u64.into()).unwrap(),
+        host_centrality_store: None,
+        host_rank_store: None,
         canonical_index: None,
     };
 
     worker.process_job(&job);
-
-    worker.host_graph.unwrap().finalize();
-    worker.page_graph.unwrap().finalize();
+    worker.graph.optimize_read().unwrap();
 
     Ok(())
 }
 
 fn calculate_centrality() {
-    debug!("Calculating centrality");
-    let webgraph_path = Path::new(DATA_PATH).join("webgraph_host");
+    info!("Calculating centrality");
+    let webgraph_path = Path::new(DATA_PATH).join("webgraph");
     let out_path = Path::new(DATA_PATH).join("centrality");
 
     if !out_path.exists() {
         Centrality::build_harmonic(&webgraph_path, &out_path);
     }
 
-    let webgraph_page = Path::new(DATA_PATH).join("webgraph_page");
     let out_path_page = Path::new(DATA_PATH).join("centrality_page");
 
     if !out_path_page.exists() {
-        Centrality::build_approx_harmonic(webgraph_page, out_path_page).unwrap();
+        Centrality::build_approx_harmonic(webgraph_path, out_path_page).unwrap();
     }
 }
 
 fn create_inverted_index() -> Result<()> {
-    debug!("Creating inverted index");
+    info!("Creating inverted index");
     let out_path = Path::new(DATA_PATH).join("index");
 
     if out_path.exists() {
@@ -175,7 +168,7 @@ fn create_inverted_index() -> Result<()> {
         },
     };
 
-    let webgraph_path = Path::new(DATA_PATH).join("webgraph_page");
+    let webgraph_path = Path::new(DATA_PATH).join("webgraph");
     let centrality_path = Path::new(DATA_PATH).join("centrality");
     let page_centrality_path = Path::new(DATA_PATH).join("centrality_page");
     let dual_encoder_path = Path::new(DATA_PATH).join("dual_encoder");
@@ -216,6 +209,7 @@ fn create_inverted_index() -> Result<()> {
 }
 
 fn create_entity_index() -> Result<()> {
+    info!("Creating entity index");
     let out_path = Path::new(DATA_PATH).join("entity");
     if out_path.exists() {
         std::fs::remove_dir_all(&out_path)?;

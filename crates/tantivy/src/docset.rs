@@ -99,7 +99,7 @@ pub trait DocSet: Send {
     }
 }
 
-impl<'a> DocSet for &'a mut dyn DocSet {
+impl DocSet for &mut dyn DocSet {
     fn advance(&mut self) -> u32 {
         (**self).advance()
     }
@@ -150,5 +150,38 @@ impl<TDocSet: DocSet + ?Sized> DocSet for Box<TDocSet> {
     fn count(&mut self) -> u32 {
         let unboxed: &mut TDocSet = self.borrow_mut();
         unboxed.count()
+    }
+}
+
+pub struct DocSetIter<T>
+where
+    T: DocSet,
+{
+    docset: T,
+}
+
+impl<T> From<T> for DocSetIter<T>
+where
+    T: DocSet,
+{
+    fn from(docset: T) -> Self {
+        DocSetIter { docset }
+    }
+}
+
+impl<T> Iterator for DocSetIter<T>
+where
+    T: DocSet,
+{
+    type Item = DocId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let doc = self.docset.doc();
+        if doc == TERMINATED {
+            None
+        } else {
+            self.docset.advance();
+            Some(doc)
+        }
     }
 }

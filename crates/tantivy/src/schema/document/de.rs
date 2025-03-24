@@ -103,6 +103,9 @@ pub trait ValueDeserializer<'de> {
     /// Attempts to deserialize a u64 value from the deserializer.
     fn deserialize_u64(self) -> Result<u64, DeserializeError>;
 
+    /// Attempts to deserialize a u128 value from the deserializer.
+    fn deserialize_u128(self) -> Result<u128, DeserializeError>;
+
     /// Attempts to deserialize an i64 value from the deserializer.
     fn deserialize_i64(self) -> Result<i64, DeserializeError>;
 
@@ -139,6 +142,8 @@ pub enum ValueType {
     String,
     /// A u64 value.
     U64,
+    /// A u128 value.
+    U128,
     /// A i64 value.
     I64,
     /// A f64 value.
@@ -187,6 +192,12 @@ pub trait ValueVisitor {
     /// Called when the deserializer visits a u64 value.
     fn visit_u64(&self, _val: u64) -> Result<Self::Value, DeserializeError> {
         Err(DeserializeError::UnsupportedType(ValueType::U64))
+    }
+
+    #[inline]
+    /// Called when the deserializer visits a u128 value.
+    fn visit_u128(&self, _val: u128) -> Result<Self::Value, DeserializeError> {
+        Err(DeserializeError::UnsupportedType(ValueType::U128))
     }
 
     #[inline]
@@ -355,6 +366,7 @@ where
         let value_type = match type_code {
             type_codes::TEXT_CODE => ValueType::String,
             type_codes::U64_CODE => ValueType::U64,
+            type_codes::U128_CODE => ValueType::U128,
             type_codes::I64_CODE => ValueType::I64,
             type_codes::F64_CODE => ValueType::F64,
             type_codes::BOOL_CODE => ValueType::Bool,
@@ -423,6 +435,11 @@ where
         <u64 as BinarySerializable>::deserialize(self.reader).map_err(DeserializeError::from)
     }
 
+    fn deserialize_u128(self) -> Result<u128, DeserializeError> {
+        self.validate_type(ValueType::U128)?;
+        <u128 as BinarySerializable>::deserialize(self.reader).map_err(DeserializeError::from)
+    }
+
     fn deserialize_i64(self) -> Result<i64, DeserializeError> {
         self.validate_type(ValueType::I64)?;
         <i64 as BinarySerializable>::deserialize(self.reader).map_err(DeserializeError::from)
@@ -476,6 +493,10 @@ where
             ValueType::U64 => {
                 let val = self.deserialize_u64()?;
                 visitor.visit_u64(val)
+            }
+            ValueType::U128 => {
+                let val = self.deserialize_u128()?;
+                visitor.visit_u128(val)
             }
             ValueType::I64 => {
                 let val = self.deserialize_i64()?;

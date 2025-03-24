@@ -40,6 +40,10 @@ impl VeryJankyBloomFilter {
         )
     }
 
+    fn insert_u128(&mut self, item: u128) {
+        self.insert(item as u64); // TODO: fix
+    }
+
     fn insert(&mut self, item: u64) {
         let (a, b) = self.hash(&item);
 
@@ -70,11 +74,11 @@ impl VeryJankyBloomFilter {
 
 #[derive(serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode, Debug, Clone)]
 struct Posting {
-    ranks: Vec<u64>,
+    ranks: Vec<u128>,
 }
 
 impl Posting {
-    fn new(ranks: Vec<u64>) -> Self {
+    fn new(ranks: Vec<u128>) -> Self {
         Self { ranks }
     }
 
@@ -133,11 +137,11 @@ impl BitVec {
 
         ingoing
             .into_iter()
-            .map(|nodes| Self::new(nodes.into_iter().map(|n| n.as_u64()).collect()))
+            .map(|nodes| Self::new(nodes.into_iter().map(|n| n.as_u128()).collect()))
             .collect()
     }
 
-    pub fn new(mut ranks: Vec<u64>) -> Self {
+    pub fn new(mut ranks: Vec<u128>) -> Self {
         ranks.sort();
         ranks.dedup();
         ranks.shrink_to_fit();
@@ -146,7 +150,7 @@ impl BitVec {
         let mut bloom = VeryJankyBloomFilter::new(16);
 
         for rank in &ranks {
-            bloom.insert(*rank);
+            bloom.insert_u128(*rank);
         }
 
         let posting = Posting::new(ranks);
@@ -186,14 +190,19 @@ impl BitVec {
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        webgraph::{Edge, Node, Webgraph},
+        webpage::html::links::RelFlags,
+    };
+
     use super::*;
     use std::iter::repeat;
 
-    fn into_ranks(a: &[bool]) -> Vec<u64> {
+    fn into_ranks(a: &[bool]) -> Vec<u128> {
         a.iter()
             .enumerate()
             .filter(|(_, b)| **b)
-            .map(|(i, _)| i as u64)
+            .map(|(i, _)| i as u128)
             .collect()
     }
 
@@ -283,5 +292,40 @@ mod tests {
         let sim = a.sim(&b);
 
         assert!((expected - sim).abs() < 0.1);
+    }
+
+    #[tokio::test]
+    async fn test_ignores_no_follow() {
+        let temp_dir = crate::gen_temp_dir().unwrap();
+
+        let mut graph = Webgraph::open(&temp_dir, 0u64.into()).unwrap();
+
+        let a = Node::from("A");
+        let b = Node::from("B");
+        let c = Node::from("C");
+
+        graph
+            .insert(Edge {
+                from: a.clone(),
+                to: b.clone(),
+                rel_flags: RelFlags::NOFOLLOW,
+                ..Edge::empty()
+            })
+            .unwrap();
+
+        graph
+            .insert(Edge {
+                from: a.clone(),
+                to: c.clone(),
+                ..Edge::empty()
+            })
+            .unwrap();
+
+        graph.commit().unwrap();
+
+        let bitvecs = BitVec::batch_new_for(&[b.id(), c.id()], &graph).await;
+
+        assert_eq!(bitvecs.len(), 2);
+        assert_eq!(bitvecs[0].sim(&bitvecs[1]), 0.0);
     }
 }

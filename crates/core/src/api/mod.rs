@@ -27,11 +27,12 @@ use crate::{
     bangs::Bangs,
     config::ApiConfig,
     distributed::cluster::Cluster,
+    generic_query::TopKeyPhrasesQuery,
     improvement::{store_improvements_loop, ImprovementEvent},
     leaky_queue::LeakyQueue,
     models::dual_encoder::DualEncoder,
     ranking::models::lambdamart::LambdaMART,
-    searcher::{api::ApiSearcher, live::LiveSearcher, DistributedSearcher, SearchClient},
+    searcher::{api::ApiSearcher, DistributedSearcher, SearchClient},
     similar_hosts::SimilarHostsFinder,
     webgraph::remote::RemoteWebgraph,
 };
@@ -59,7 +60,7 @@ pub mod improvement;
 mod metrics;
 pub mod search;
 pub mod user_count;
-mod webgraph;
+pub mod webgraph;
 
 const WARMUP_QUERIES: usize = 100;
 
@@ -72,9 +73,8 @@ pub struct Counters {
 
 pub struct State {
     pub config: ApiConfig,
-    pub searcher: Arc<ApiSearcher<DistributedSearcher, LiveSearcher, Arc<RemoteWebgraph>>>,
-    pub page_webgraph: Arc<RemoteWebgraph>,
-    pub host_webgraph: Arc<RemoteWebgraph>,
+    pub searcher: Arc<ApiSearcher<DistributedSearcher, Arc<RemoteWebgraph>>>,
+    pub webgraph: Arc<RemoteWebgraph>,
     pub autosuggest: Autosuggest,
     pub counters: Counters,
     pub improvement_queue: Option<Arc<Mutex<LeakyQueue<ImprovementEvent>>>>,
@@ -111,7 +111,7 @@ fn build_router(state: Arc<State>) -> Router {
                 .layer(cors_layer()),
         )
         .layer(CompressionLayer::new())
-        .merge(docs::router())
+        .merge(docs::router().into().layer(cors_layer()))
         .nest(
             "/beta",
             Router::new()
@@ -161,9 +161,14 @@ pub async fn router(
         None => None,
     };
 
-    let query_store_queue = config.query_store_db_host.clone().map(|db_host| {
+    let query_store_queue = config.query_store_db.clone().map(|query_store_config| {
         let query_store_queue = Arc::new(Mutex::new(LeakyQueue::new(10_000)));
-        tokio::spawn(store_improvements_loop(query_store_queue.clone(), db_host));
+        tokio::spawn(store_improvements_loop(
+            query_store_queue.clone(),
+            query_store_config.host,
+            query_store_config.username,
+            query_store_config.password,
+        ));
         query_store_queue
     });
 
@@ -172,13 +177,9 @@ pub async fn router(
         None => Bangs::empty(),
     };
 
-    let host_webgraph =
-        RemoteWebgraph::new(cluster.clone(), crate::config::WebgraphGranularity::Host).await;
-    let page_webgraph =
-        RemoteWebgraph::new(cluster.clone(), crate::config::WebgraphGranularity::Page).await;
+    let webgraph = RemoteWebgraph::new(cluster.clone()).await;
 
     let dist_searcher = DistributedSearcher::new(Arc::clone(&cluster)).await;
-    let live_searcher = LiveSearcher::new(Arc::clone(&cluster));
 
     if !cluster
         .members()
@@ -186,7 +187,7 @@ pub async fn router(
         .iter()
         .any(|m| m.service.is_searcher())
     {
-        log::warn!("Waiting for search nodes to join the cluster");
+        log::info!("Waiting for search nodes to join the cluster");
         cluster.await_member(|m| m.service.is_searcher()).await;
         log::info!("Search nodes joined the cluster");
     }
@@ -194,8 +195,9 @@ pub async fn router(
     log::info!("Building autosuggest");
     let autosuggest = Autosuggest::from_key_phrases(
         dist_searcher
-            .top_key_phrases(config.top_phrases_for_autosuggest)
-            .await,
+            .search_generic(TopKeyPhrasesQuery::new(config.top_phrases_for_autosuggest))
+            .await
+            .unwrap_or_default(),
     )?;
 
     let state = {
@@ -206,7 +208,7 @@ pub async fn router(
         }
 
         let mut searcher =
-            ApiSearcher::new(dist_searcher, bangs, config.clone()).with_live(live_searcher);
+            ApiSearcher::new(dist_searcher, Some(cluster.clone()), bangs, config.clone()).await;
 
         if let Some(cross_encoder) = cross_encoder {
             searcher = searcher.with_cross_encoder(cross_encoder);
@@ -230,21 +232,19 @@ pub async fn router(
                 .await;
         }
 
-        let host_webgraph = Arc::new(host_webgraph);
-        let page_webgraph = Arc::new(page_webgraph);
+        let webgraph = Arc::new(webgraph);
 
-        searcher = searcher.with_webgraph(Arc::clone(&host_webgraph));
+        searcher = searcher.with_webgraph(Arc::clone(&webgraph));
 
         let similar_hosts =
-            SimilarHostsFinder::new(Arc::clone(&host_webgraph), config.max_similar_hosts);
+            SimilarHostsFinder::new(Arc::clone(&webgraph), config.max_similar_hosts);
 
         Arc::new(State {
             config: config.clone(),
             searcher: Arc::new(searcher),
             autosuggest,
             counters,
-            host_webgraph,
-            page_webgraph,
+            webgraph,
             improvement_queue: query_store_queue,
             _cluster: cluster,
             similar_hosts,

@@ -33,7 +33,7 @@ use distributed::{
     cluster::Cluster,
     member::{Member, Service},
 };
-pub use file_store::gen_temp_path;
+pub use file_store::{gen_temp_dir, gen_temp_path};
 use std::{cmp::Reverse, sync::Arc};
 use thiserror::Error;
 
@@ -42,7 +42,7 @@ pub mod inverted_index;
 
 pub mod ampc;
 
-mod api;
+pub mod api;
 pub mod autosuggest;
 mod backlink_grouper;
 pub mod bangs;
@@ -52,6 +52,7 @@ pub mod canon_index;
 mod collector;
 pub mod config;
 pub mod crawler;
+mod dated_url;
 pub mod distributed;
 pub mod entity_index;
 mod enum_map;
@@ -64,10 +65,11 @@ pub mod image_store;
 mod improvement;
 pub mod index;
 mod intmap;
+pub mod iter_ext;
 mod kahan_sum;
 mod leaky_queue;
 mod live_index;
-mod log_group;
+pub mod log_group;
 mod metrics;
 mod models;
 pub mod naive_bayes;
@@ -82,6 +84,7 @@ mod search_prettifier;
 pub mod searcher;
 mod simhash;
 pub mod similar_hosts;
+mod sitemap;
 mod snippet;
 mod stopwords;
 pub mod summarizer;
@@ -89,10 +92,11 @@ pub mod tokenizer;
 #[allow(unused)]
 mod ttl_cache;
 pub mod warc;
-pub mod web_spell;
 pub mod webgraph;
 pub mod webpage;
 mod widgets;
+
+pub mod generic_query;
 
 pub use block_on::block_on;
 
@@ -145,22 +149,17 @@ pub fn start_gossip_cluster_thread(config: GossipConfig, service: Option<Service
         rt.block_on(async {
             let cluster = match service {
                 Some(service) => Cluster::join(
-                    Member {
-                        id: config.cluster_id,
-                        service,
-                    },
+                    Member::new(service),
                     config.addr,
                     config.seed_nodes.unwrap_or_default(),
                 )
                 .await
                 .unwrap(),
-                None => Cluster::join_as_spectator(
-                    config.cluster_id,
-                    config.addr,
-                    config.seed_nodes.unwrap_or_default(),
-                )
-                .await
-                .unwrap(),
+                None => {
+                    Cluster::join_as_spectator(config.addr, config.seed_nodes.unwrap_or_default())
+                        .await
+                        .unwrap()
+                }
             };
 
             let cluster = Arc::new(cluster);
@@ -394,17 +393,6 @@ pub fn mv<P1: AsRef<std::path::Path>, P2: AsRef<std::path::Path>>(
     }
 
     Ok(())
-}
-
-pub fn urlencode(s: &str) -> String {
-    const FRAGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
-        .add(b' ')
-        .add(b'"')
-        .add(b'<')
-        .add(b'>')
-        .add(b'`');
-
-    percent_encoding::utf8_percent_encode(s, FRAGMENT).to_string()
 }
 
 #[cfg(test)]

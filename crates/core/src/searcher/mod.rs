@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -14,9 +14,14 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+//! Searchers are responsible for executing search queries against an index.
+//! There are two types of searchers:
+//! - [`local::LocalSearcher`] which runs the search on the local machine.
+//! - [`distributed::DistributedSearcher`] which runs the search on a remote cluster. Each node
+//!     will run a local searcher and then the results are merged on the coordinator node.
+
 pub mod api;
 pub mod distributed;
-pub mod live;
 pub mod local;
 
 pub use distributed::*;
@@ -142,6 +147,11 @@ impl SearchQuery {
         }
 
         rankings
+    }
+
+    pub fn fetch_backlinks(&self) -> bool {
+        let host_rankings = self.host_rankings();
+        !host_rankings.liked.is_empty() || !host_rankings.disliked.is_empty()
     }
 
     pub fn text(&self) -> &str {

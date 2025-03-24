@@ -33,6 +33,9 @@ pub trait UrlExt {
     fn parse_with_base_url(base_url: &url::Url, url: &str) -> Result<url::Url> {
         url::Url::parse(url).or_else(|_| base_url.join(url).map_err(|e| e.into()))
     }
+    fn robust_parse(url: &str) -> Result<url::Url, url::ParseError> {
+        url::Url::parse(url).or_else(|_| url::Url::parse(&format!("https://{}", url)))
+    }
     fn icann_domain(&self) -> Option<&str>;
     fn root_domain(&self) -> Option<&str>;
     fn normalized_host(&self) -> Option<&str>;
@@ -123,8 +126,15 @@ impl UrlExt for url::Url {
 
     fn tld(&self) -> Option<&str> {
         let host = self.host_str()?;
-        let suffix = std::str::from_utf8(ICANN_LIST.suffix(host.as_bytes())?.as_bytes()).ok()?;
-        Some(suffix)
+        let suffix = ICANN_LIST.suffix(host.as_bytes())?;
+
+        match suffix.typ() {
+            Some(_) => {
+                let tld = std::str::from_utf8(suffix.as_bytes()).ok()?;
+                Some(tld)
+            }
+            None => None,
+        }
     }
 }
 
@@ -161,5 +171,20 @@ mod tests {
 
         let url: Url = Url::parse("http://example.com").unwrap();
         assert_eq!(url.tld().unwrap(), "com");
+    }
+
+    #[test]
+    fn tld() {
+        let url: Url = Url::parse("http://example.com").unwrap();
+        assert_eq!(url.tld().unwrap(), "com");
+
+        let url: Url = Url::parse("http://example.co.uk").unwrap();
+        assert_eq!(url.tld().unwrap(), "co.uk");
+
+        let url: Url = Url::parse("http://example.co.uk").unwrap();
+        assert_eq!(url.tld().unwrap(), "co.uk");
+
+        let url: Url = Url::parse("http://asdf").unwrap();
+        assert_eq!(url.tld(), None);
     }
 }

@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -182,7 +182,10 @@ impl PatternWeight {
         {
             return Ok(Some(PatternScorer::EmptyField(EmptyFieldScorer {
                 num_tokens_columnfield,
-                segment_reader: self.columnfield_reader.get_segment(&reader.segment_id()),
+                segment_reader: self
+                    .columnfield_reader
+                    .borrow_segment(&reader.segment_id())
+                    .clone(),
                 all_scorer: AllScorer {
                     doc: 0,
                     max_doc: reader.max_doc(),

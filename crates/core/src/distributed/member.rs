@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -15,8 +15,6 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::net::SocketAddr;
-
-use crate::config::WebgraphGranularity;
 
 #[derive(
     serde::Serialize,
@@ -101,14 +99,15 @@ impl std::fmt::Display for LiveIndexState {
 pub enum Service {
     Searcher {
         host: SocketAddr,
-        shard: ShardId,
+        shard: crate::inverted_index::ShardId,
     },
     EntitySearcher {
         host: SocketAddr,
     },
     LiveIndex {
         host: SocketAddr,
-        shard: ShardId,
+        search_host: SocketAddr,
+        shard: crate::inverted_index::ShardId,
         state: LiveIndexState,
     },
     Api {
@@ -117,7 +116,6 @@ pub enum Service {
     Webgraph {
         host: SocketAddr,
         shard: ShardId,
-        granularity: WebgraphGranularity,
     },
     Dht {
         host: SocketAddr,
@@ -127,15 +125,13 @@ pub enum Service {
         host: SocketAddr,
         shard: ShardId,
     },
-    HarmonicCoordinator {
-        host: SocketAddr,
-    },
     ApproxHarmonicWorker {
         host: SocketAddr,
         shard: ShardId,
     },
-    ApproxHarmonicCoordinator {
+    ShortestPathWorker {
         host: SocketAddr,
+        shard: ShardId,
     },
 }
 
@@ -144,25 +140,25 @@ impl std::fmt::Display for Service {
         match self {
             Self::Searcher { host, shard } => write!(f, "Searcher {} {}", host, shard),
             Self::EntitySearcher { host } => write!(f, "EntitySearcher {}", host),
-            Self::LiveIndex { host, shard, state } => {
-                write!(f, "LiveIndex {} {} {}", host, shard, state)
+            Self::LiveIndex {
+                host,
+                search_host,
+                shard,
+                state,
+            } => {
+                write!(f, "LiveIndex {} {} {} {}", host, search_host, shard, state)
             }
             Self::Api { host } => write!(f, "Api {}", host),
-            Self::Webgraph {
-                host,
-                shard,
-                granularity,
-            } => {
-                write!(f, "Webgraph {} {} {}", host, shard, granularity)
+            Self::Webgraph { host, shard } => {
+                write!(f, "Webgraph {} {}", host, shard)
             }
             Self::Dht { host, shard } => write!(f, "Dht {} {}", host, shard),
             Self::HarmonicWorker { host, shard } => write!(f, "HarmonicWorker {} {}", host, shard),
-            Self::HarmonicCoordinator { host } => write!(f, "HarmonicCoordinator {}", host),
             Self::ApproxHarmonicWorker { host, shard } => {
                 write!(f, "ApproxHarmonicWorker {} {}", host, shard)
             }
-            Self::ApproxHarmonicCoordinator { host } => {
-                write!(f, "ApproxHarmonicCoordinator {}", host)
+            Self::ShortestPathWorker { host, shard } => {
+                write!(f, "ShortestPathWorker {} {}", host, shard)
             }
         }
     }
@@ -178,4 +174,11 @@ impl Service {
 pub struct Member {
     pub id: String,
     pub service: Service,
+}
+
+impl Member {
+    pub fn new(service: Service) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        Self { id, service }
+    }
 }

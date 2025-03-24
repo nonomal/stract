@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use anyhow::anyhow;
 use hashbrown::HashSet;
-use quick_xml::events::Event;
+use itertools::Itertools;
 use rand::seq::SliceRandom;
 
 use std::{
@@ -30,17 +30,18 @@ use url::Url;
 use crate::{
     config::CrawlerConfig,
     crawler::MAX_URL_LEN_BYTES,
+    dated_url::DatedUrl,
     distributed::{retry_strategy::ExponentialBackoff, sonic},
     entrypoint::crawler::router::{NewJob, RouterService},
+    sitemap::{parse_sitemap, SitemapEntry},
     warc,
     webpage::{url_ext::UrlExt, Html},
 };
 
 use super::{
-    encoded_body, reqwest_client, robots_txt::RobotsTxtManager,
-    wander_prirotiser::WanderPrioritiser, CrawlDatum, DatumStream, Domain, Error, Result,
-    RetrieableUrl, Site, WarcWriter, WeightedUrl, WorkerJob, MAX_CONTENT_LENGTH,
-    MAX_OUTGOING_URLS_PER_PAGE,
+    encoded_body, robot_client::RobotClient, wander_prioritiser::WanderPrioritiser, CrawlDatum,
+    DatumSink, Domain, Error, Result, RetrieableUrl, Site, WarcWriter, WeightedUrl, WorkerJob,
+    MAX_CONTENT_LENGTH, MAX_OUTGOING_URLS_PER_PAGE,
 };
 
 const IGNORED_EXTENSIONS: [&str; 27] = [
@@ -62,19 +63,18 @@ struct ProcessedUrl {
 
 pub struct WorkerThread {
     writer: Arc<WarcWriter>,
-    client: reqwest::Client,
     config: Arc<CrawlerConfig>,
     router_hosts: Vec<SocketAddr>,
+    client: RobotClient,
 }
 
 impl WorkerThread {
     pub fn new(
         writer: Arc<WarcWriter>,
+        client: RobotClient,
         config: CrawlerConfig,
         router_hosts: Vec<SocketAddr>,
     ) -> Result<Self> {
-        let client = reqwest_client(&config)?;
-
         Ok(Self {
             writer,
             client,
@@ -108,9 +108,9 @@ impl WorkerThread {
                 Ok(Some(job)) => {
                     let executor = JobExecutor::new(
                         job.into(),
-                        self.client.clone(),
                         self.config.clone(),
                         self.writer.clone(),
+                        self.client.clone(),
                     );
                     executor.run().await;
                 }
@@ -126,12 +126,12 @@ impl WorkerThread {
     }
 }
 
-pub struct JobExecutor<S: DatumStream> {
+/// JobExecutor receives a job from the coordinator and crawls the urls in the job.
+pub struct JobExecutor<S: DatumSink> {
     writer: Arc<S>,
-    client: reqwest::Client,
+    client: RobotClient,
     has_gotten_429_response: bool,
     politeness_factor: u32,
-    robotstxt: RobotsTxtManager,
     crawled_urls: HashSet<Url>,
     crawled_sitemaps: HashSet<Site>,
     sitemap_urls: HashSet<Url>,
@@ -145,18 +145,17 @@ pub struct JobExecutor<S: DatumStream> {
     job: WorkerJob,
 }
 
-impl<S: DatumStream> JobExecutor<S> {
+impl<S: DatumSink> JobExecutor<S> {
     pub fn new(
         job: WorkerJob,
-        client: reqwest::Client,
         config: Arc<CrawlerConfig>,
         writer: Arc<S>,
+        client: RobotClient,
     ) -> Self {
         Self {
             writer,
             politeness_factor: config.start_politeness_factor,
             min_politeness_factor: config.min_politeness_factor,
-            robotstxt: RobotsTxtManager::new(&config),
             client,
             crawled_urls: HashSet::new(),
             crawled_sitemaps: HashSet::new(),
@@ -195,7 +194,10 @@ impl<S: DatumStream> JobExecutor<S> {
         }
 
         self.scheduled_urls().await;
-        self.crawl_sitemaps().await;
+
+        if self.wandered_urls < self.job.wandering_urls {
+            self.crawl_sitemaps().await;
+        }
 
         while self.wandered_urls < self.job.wandering_urls
             && self.wander_prioritiser.known_urls() > 0
@@ -222,10 +224,8 @@ impl<S: DatumStream> JobExecutor<S> {
             .filter(|(url, _)| !self.crawled_urls.contains(url))
             .filter(|(url, _)| self.job.domain == Domain::from(url))
             .filter(|(_, score)| score.is_finite())
+            .unique_by(|(url, _)| url.clone())
             .collect();
-
-        urls.sort_by(|(a, _), (b, _)| a.cmp(b));
-        urls.dedup_by(|(a, _), (b, _)| a == b);
 
         urls.sort_by(|(_, a), (_, b)| b.total_cmp(a));
 
@@ -266,7 +266,12 @@ impl<S: DatumStream> JobExecutor<S> {
             return UrlVisit::Skip;
         }
 
-        if !self.robotstxt.is_allowed(retryable_url.url()).await {
+        if !self
+            .client
+            .robots_txt_manager()
+            .is_allowed(retryable_url.url())
+            .await
+        {
             return UrlVisit::Skip;
         }
 
@@ -280,28 +285,40 @@ impl<S: DatumStream> JobExecutor<S> {
     }
 
     async fn crawl_sitemaps(&mut self) {
-        for url in self.job.urls.iter().map(|url| url.url()) {
+        let urls: Vec<_> = self.job.urls.iter().map(|url| url.url()).cloned().collect();
+
+        for url in urls {
             let site = Site(url.host_str().unwrap_or_default().to_string());
             if !self.crawled_sitemaps.contains(&site) {
                 self.crawled_sitemaps.insert(site.clone());
 
-                let sitemaps = self.robotstxt.sitemaps(url).await;
+                let sitemaps = self.client.robots_txt_manager().sitemaps(&url).await;
 
                 for sitemap in sitemaps {
+                    let res = self.urls_from_sitemap(sitemap, 5).await;
                     self.sitemap_urls
-                        .extend(self.urls_from_sitemap(sitemap, 5).await);
+                        .extend(res.into_iter().map(|dated_url| dated_url.url));
                 }
             }
         }
     }
 
-    async fn process_urls(&mut self, mut urls: VecDeque<RetrieableUrl>) {
-        while let Some(retryable_url) = urls.pop_front() {
+    pub async fn process_urls(&mut self, mut urls: VecDeque<RetrieableUrl>) {
+        tracing::debug!("processing {} urls", urls.len());
+        while let Some(mut retryable_url) = urls.pop_front() {
+            retryable_url.weighted_url.url.normalize_in_place();
+
             if let UrlVisit::Skip = self.verify_url(&retryable_url).await {
+                tracing::debug!("skipping url: {}", retryable_url.url());
                 continue;
             }
 
-            if let Some(delay) = self.robotstxt.crawl_delay(retryable_url.url()).await {
+            if let Some(delay) = self
+                .client
+                .robots_txt_manager()
+                .crawl_delay(retryable_url.url())
+                .await
+            {
                 if delay > self.min_crawl_delay {
                     self.min_crawl_delay = delay.min(self.max_crawl_delay);
                 }
@@ -405,6 +422,7 @@ impl<S: DatumStream> JobExecutor<S> {
         html.anchor_links()
             .into_iter()
             .map(|link| link.destination)
+            .filter(|url| matches!(url.scheme(), "http" | "https"))
             .map(|mut url| {
                 url.normalize_in_place();
                 url
@@ -416,11 +434,12 @@ impl<S: DatumStream> JobExecutor<S> {
                     .all(|ext| !url.as_str().ends_with(ext))
             })
             .filter(|url| !self.crawled_urls.contains(url))
+            .unique()
             .collect()
     }
 
     async fn process_url(&mut self, url: Url) -> Result<ProcessedUrl> {
-        let datum = self.crawl_url(url.clone()).await?;
+        let datum = self.polite_crawl_url(url.clone()).await?;
         self.save_datum(datum.clone()).await;
 
         match Html::parse(&datum.body, datum.url.as_str()) {
@@ -444,7 +463,8 @@ impl<S: DatumStream> JobExecutor<S> {
 
     async fn fetch(&self, url: Url) -> Result<reqwest::Response> {
         self.client
-            .get(url.to_string())
+            .get(url)
+            .await?
             .send()
             .await
             .map_err(|e| Error::from(anyhow!(e)))
@@ -527,7 +547,6 @@ impl<S: DatumStream> JobExecutor<S> {
         res: &reqwest::Response,
         url: &Url,
         payload_type: warc::PayloadType,
-        fetch_time: Duration,
     ) -> Result<Option<CrawlDatum>> {
         let status_code = res.status().as_u16();
 
@@ -547,14 +566,53 @@ impl<S: DatumStream> JobExecutor<S> {
                 url,
                 payload_type,
                 body: String::new(),
-                fetch_time_ms: fetch_time.as_millis() as u64,
+                fetch_time_ms: 0,
+                date: chrono::Utc::now(),
             }))
         } else {
             Ok(None)
         }
     }
 
-    async fn crawl_url(&mut self, url: Url) -> Result<CrawlDatum> {
+    async fn unpolite_crawl_url(&mut self, url: Url) -> Result<CrawlDatum> {
+        tracing::debug!("crawling url: {}", url);
+
+        let res = self.fetch_with_https_priority(url.clone()).await?;
+
+        let payload_type = self.check_headers(&res);
+        let status_code = res.status();
+        let mut res_url = res.url().clone();
+
+        if let Ok(payload_type) = payload_type {
+            if let Ok(Some(datum)) = self.redirect_datum(&res, &url, payload_type) {
+                return Ok(datum);
+            }
+        }
+        if status_code != reqwest::StatusCode::OK {
+            return Err(Error::FetchFailed {
+                status_code,
+                headers: res.headers().clone(),
+            });
+        }
+
+        let body = encoded_body(res).await;
+
+        self.crawled_urls.insert(url.clone());
+
+        res_url.normalize_in_place();
+
+        self.crawled_urls.insert(res_url.clone());
+
+        Ok(CrawlDatum {
+            url: res_url,
+            body: body?,
+            payload_type: payload_type?,
+            fetch_time_ms: 0,
+            date: chrono::Utc::now(),
+        })
+    }
+
+    async fn polite_crawl_url(&mut self, url: Url) -> Result<CrawlDatum> {
         let mut url = url;
         url.normalize_in_place();
 
@@ -563,45 +621,15 @@ impl<S: DatumStream> JobExecutor<S> {
         }
 
         let start = Instant::now();
-        let res = self.fetch_with_https_priority(url.clone()).await;
+        let res = self.unpolite_crawl_url(url).await;
         let fetch_time = start.elapsed();
         self.politeness_delay(fetch_time).await;
-
-        // we want to delay before returning the error
-        let res = res?;
-
-        self.crawled_urls.insert(url.clone());
-        let payload_type = self.check_headers(&res)?;
-
-        if let Some(datum) = self.redirect_datum(&res, &url, payload_type, fetch_time)? {
-            return Ok(datum);
-        }
-
-        let status_code = res.status();
-
-        if status_code != reqwest::StatusCode::OK {
-            return Err(Error::FetchFailed {
-                status_code,
-                headers: res.headers().clone(),
-            });
-        }
-
-        let mut res_url = res.url().clone();
-        res_url.normalize_in_place();
-
-        self.crawled_urls.insert(res_url.clone());
-
-        let body = encoded_body(res).await?;
-
-        Ok(CrawlDatum {
-            url: res_url,
-            body,
-            payload_type,
-            fetch_time_ms: fetch_time.as_millis() as u64,
-        })
+        let mut datum = res?;
+        datum.fetch_time_ms = fetch_time.as_millis() as u64;
+        Ok(datum)
     }
 
-    async fn urls_from_sitemap(&self, sitemap: Url, max_depth: usize) -> Vec<Url> {
+    async fn urls_from_sitemap(&mut self, sitemap: Url, max_depth: usize) -> Vec<DatedUrl> {
         let mut stack = vec![(sitemap, 0)];
         let mut urls = vec![];
 
@@ -646,157 +674,5 @@ impl<S: DatumStream> JobExecutor<S> {
         }
 
         urls
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SitemapEntry {
-    Url(Url),
-    Sitemap(Url),
-}
-
-fn parse_sitemap(s: &str) -> Vec<SitemapEntry> {
-    let mut reader = quick_xml::Reader::from_str(s);
-
-    let mut res = vec![];
-
-    let mut in_sitemap = false;
-    let mut in_url = false;
-    let mut in_loc = false;
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) => {
-                if e.name().as_ref() == b"sitemap" {
-                    in_sitemap = true;
-                } else if e.name().as_ref() == b"url" {
-                    in_url = true;
-                } else if e.name().as_ref() == b"loc" {
-                    in_loc = true;
-                }
-            }
-            Ok(Event::End(ref e)) => {
-                if e.name().as_ref() == b"sitemap" {
-                    in_sitemap = false;
-                } else if e.name().as_ref() == b"url" {
-                    in_url = false;
-                } else if e.name().as_ref() == b"loc" {
-                    in_loc = false;
-                }
-            }
-            Ok(Event::Text(e)) => {
-                if in_sitemap && in_loc {
-                    if let Ok(url) = Url::parse(&e.unescape().unwrap()) {
-                        res.push(SitemapEntry::Sitemap(url));
-                    }
-                } else if in_url && in_loc {
-                    if let Ok(url) = Url::parse(&e.unescape().unwrap()) {
-                        res.push(SitemapEntry::Url(url));
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                tracing::debug!("failed to parse sitemap: {}", e);
-                break;
-            }
-            _ => (),
-        }
-    }
-
-    res
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn parse_sitemap() {
-        let dr = r#"<sitemapindex>
-        <sitemap>
-        <loc>https://www.dr.dk/drtv/sitemap.xml</loc>
-        </sitemap>
-        <sitemap>
-        <loc>https://www.dr.dk/sitemap.tvguide.xml</loc>
-        </sitemap>
-        <sitemap>
-        <loc>
-        https://www.dr.dk/sitemap.kommunalvalg.resultater.xml
-        </loc>
-        </sitemap>
-        <sitemap>
-        <loc>https://www.dr.dk/sitemap.folketingsvalg2022.xml</loc>
-        </sitemap>
-        </sitemapindex>"#;
-
-        let entries = super::parse_sitemap(dr);
-        assert_eq!(
-            entries,
-            vec![
-                super::SitemapEntry::Sitemap("https://www.dr.dk/drtv/sitemap.xml".parse().unwrap()),
-                super::SitemapEntry::Sitemap(
-                    "https://www.dr.dk/sitemap.tvguide.xml".parse().unwrap()
-                ),
-                super::SitemapEntry::Sitemap(
-                    "https://www.dr.dk/sitemap.kommunalvalg.resultater.xml"
-                        .parse()
-                        .unwrap()
-                ),
-                super::SitemapEntry::Sitemap(
-                    "https://www.dr.dk/sitemap.folketingsvalg2022.xml"
-                        .parse()
-                        .unwrap()
-                ),
-            ]
-        );
-
-        let dr = r#"<urlset>
-        <url>
-        <lastmod>2023-10-18T05:40:04.7435930+00:00</lastmod>
-        <loc>https://www.dr.dk/drtv/serie/sleepover_6382</loc>
-        </url>
-        <url>
-        <lastmod>2023-10-18T05:40:04.7435930+00:00</lastmod>
-        <loc>https://www.dr.dk/drtv/saeson/sleepover_9673</loc>
-        </url>
-        <url>
-        <lastmod>2023-10-18T05:40:04.7435930+00:00</lastmod>
-        <loc>
-        https://www.dr.dk/drtv/episode/sleepover_-zoologisk-museum_52239
-        </loc>
-        </url>
-        <url>
-        <lastmod>2023-10-18T05:40:04.7435930+00:00</lastmod>
-        <loc>
-        https://www.dr.dk/drtv/episode/sleepover_-koebenhavns-raadhus_52252
-        </loc>
-        </url>
-        </urlset>"#;
-
-        let entries = super::parse_sitemap(dr);
-        assert_eq!(
-            entries,
-            vec![
-                super::SitemapEntry::Url(
-                    "https://www.dr.dk/drtv/serie/sleepover_6382"
-                        .parse()
-                        .unwrap()
-                ),
-                super::SitemapEntry::Url(
-                    "https://www.dr.dk/drtv/saeson/sleepover_9673"
-                        .parse()
-                        .unwrap()
-                ),
-                super::SitemapEntry::Url(
-                    "https://www.dr.dk/drtv/episode/sleepover_-zoologisk-museum_52239"
-                        .parse()
-                        .unwrap()
-                ),
-                super::SitemapEntry::Url(
-                    "https://www.dr.dk/drtv/episode/sleepover_-koebenhavns-raadhus_52252"
-                        .parse()
-                        .unwrap()
-                ),
-            ]
-        );
     }
 }

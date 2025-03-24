@@ -13,6 +13,7 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
@@ -66,20 +67,14 @@ enum Commands {
     },
 
     /// Deploy the search server.
-    SearchServer {
-        config_path: String,
-    },
+    SearchServer { config_path: String },
 
     /// Deploy the entity search server.
-    EntitySearchServer {
-        config_path: String,
-    },
+    EntitySearchServer { config_path: String },
 
     /// Deploy the json http api. The api interacts with
     /// the search servers, webgraph servers etc. to provide the necesarry functionality.
-    Api {
-        config_path: String,
-    },
+    Api { config_path: String },
 
     /// Deploy the crawler.
     Crawler {
@@ -102,23 +97,19 @@ enum Commands {
         ml: bool,
     },
 
-    // Commands for the live index.
+    /// Commands for the live index.
     LiveIndex {
         #[clap(subcommand)]
         options: LiveIndex,
     },
 
-    // Build spell correction model.
-    WebSpell {
-        config_path: String,
-    },
+    /// Build spell correction model.
+    WebSpell { config_path: String },
 
-    // Compute statistics for sites.
-    SiteStats {
-        config_path: String,
-    },
+    /// Compute statistics for sites.
+    SiteStats { config_path: String },
 
-    // Commands to compute distributed graph algorithms.
+    /// Commands to compute distributed graph algorithms.
     Ampc {
         #[clap(subcommand)]
         options: AmpcOptions,
@@ -143,32 +134,36 @@ enum AmpcOptions {
     /// Workers needs to be started before the coordinator.
     HarmonicCoordinator { config_path: String },
 
-    /// Start a worker to compute an approximation of the harmonic centrality of a graph.
-    /// The approximation samples O(log n / sample_rate^2) nodes from the graph and computes
-    /// shortest paths from the sampled nodes.
-    ApproxHarmonicWorker { config_path: String },
-
     /// Start a coordinator to distribute the approximation of the harmonic centrality computation.
-    /// Workers needs to be started before the coordinator.
+    /// Uses shortest path workers. Workers needs to be started before the coordinator.
     ApproxHarmonicCoordinator { config_path: String },
+
+    /// Start a worker to compute the shortest paths of a graph.
+    ShortestPathWorker { config_path: String },
+
+    /// Start a coordinator to distribute the shortest path computation.
+    /// Workers needs to be started before the coordinator.
+    ShortestPathCoordinator { config_path: String },
 }
 
 #[derive(Subcommand)]
 enum AdminOptions {
-    Init {
-        host: SocketAddr,
-    },
-    Status,
-    TopKeyphrases {
-        top: usize,
-    },
+    /// Create the admin config file. Run this before any other admin commands so the client knows where to connect.
+    Init { host: SocketAddr },
 
+    /// Print the reachable cluster members and which service they are running.
+    Status,
+
+    /// Export the top most common phrases in the index.
+    TopKeyphrases { top: usize },
+
+    /// Get statistics about the index.
     #[clap(subcommand)]
-    Index(AdminIndexOptions),
+    IndexStats(AdminIndexStatsOptions),
 }
 
 #[derive(Subcommand)]
-enum AdminIndexOptions {
+enum AdminIndexStatsOptions {
     /// Get the size of the index
     Size,
 }
@@ -177,6 +172,9 @@ enum AdminIndexOptions {
 enum LiveIndex {
     /// Serve the live index.
     Serve { config_path: String },
+
+    /// Start the live index crawler.
+    Crawler { config_path: String },
 }
 
 #[derive(Subcommand)]
@@ -217,11 +215,16 @@ enum CentralityMode {
         webgraph_path: String,
         output_path: String,
     },
-    /// Calculate approximate harmonic centrality for the page webgraph.
+    /// Calculate approximate harmonic centrality.
     ApproxHarmonic {
         webgraph_path: String,
         output_path: String,
     },
+
+    /// Calculate harmonic centrality nearest neighbor that uses
+    /// the harmonic centrality of the highest neighbors node
+    /// as a seed node proxy for the centrality of that node (with a discount factor).
+    HarmonicNearestSeed { config_path: String },
 }
 
 #[derive(Subcommand)]
@@ -233,9 +236,6 @@ enum WebgraphOptions {
     Merge {
         #[clap(required = true)]
         paths: Vec<String>,
-
-        #[clap(default_value_t = stract::config::defaults::Webgraph::merge_all_segments())]
-        merge_all_segments: bool,
     },
 
     /// Deploy the webgraph server. The webgraph server is responsible for serving the webgraph to the search servers.
@@ -246,9 +246,7 @@ enum WebgraphOptions {
 #[derive(Subcommand)]
 enum IndexingOptions {
     /// Create the search index.
-    Search {
-        config_path: String,
-    },
+    Search { config_path: String },
 
     /// Merge multiple search indexes into a single index.
     MergeSearch {
@@ -262,15 +260,8 @@ enum IndexingOptions {
         output_path: String,
     },
 
-    /// Create the feed index. Used to find feeds to put into the live index.
-    Feed {
-        config_path: String,
-    },
-
-    // Create an index of canonical urls.
-    Canonical {
-        config_path: String,
-    },
+    /// Create an index of canonical urls.
+    Canonical { config_path: String },
 }
 
 fn load_toml_config<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> T {
@@ -308,10 +299,6 @@ fn main() -> Result<()> {
                 wikipedia_dump_path,
                 output_path,
             } => entrypoint::EntityIndexer::run(wikipedia_dump_path, output_path)?,
-            IndexingOptions::Feed { config_path } => {
-                let config = load_toml_config(config_path);
-                entrypoint::feed_indexer::build(config)?;
-            }
             IndexingOptions::MergeSearch { paths } => {
                 let pointers = paths
                     .into_iter()
@@ -324,45 +311,40 @@ fn main() -> Result<()> {
                 entrypoint::canonical::create(config)?;
             }
         },
-        Commands::Centrality { mode } => {
-            match mode {
-                CentralityMode::Harmonic {
-                    webgraph_path,
-                    output_path,
-                } => {
-                    entrypoint::Centrality::build_harmonic(&webgraph_path, &output_path);
-                }
-                CentralityMode::ApproxHarmonic {
-                    webgraph_path,
-                    output_path,
-                } => entrypoint::Centrality::build_approx_harmonic(webgraph_path, output_path)?,
+        Commands::Centrality { mode } => match mode {
+            CentralityMode::Harmonic {
+                webgraph_path,
+                output_path,
+            } => {
+                entrypoint::Centrality::build_harmonic(&webgraph_path, &output_path);
             }
-            tracing::info!("Done");
-        }
+            CentralityMode::ApproxHarmonic {
+                webgraph_path,
+                output_path,
+            } => entrypoint::Centrality::build_approx_harmonic(webgraph_path, output_path)?,
+            CentralityMode::HarmonicNearestSeed { config_path } => {
+                let config: config::HarmonicNearestSeedConfig = load_toml_config(config_path);
+
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(entrypoint::Centrality::harmonic_nearest_seed(config))?;
+            }
+        },
         Commands::Webgraph { options } => match options {
             WebgraphOptions::Create { config_path } => {
                 let config = load_toml_config(config_path);
                 entrypoint::Webgraph::run(&config)?;
             }
-            WebgraphOptions::Merge {
-                mut paths,
-                merge_all_segments,
-            } => {
-                let mut webgraph = WebgraphBuilder::new(paths.remove(0))
-                    .single_threaded()
-                    .open();
+            WebgraphOptions::Merge { mut paths } => {
+                let mut webgraph = WebgraphBuilder::new(paths.remove(0), 0u64.into()).open()?;
 
                 for other_path in paths {
-                    let other = WebgraphBuilder::new(&other_path).single_threaded().open();
+                    let other = WebgraphBuilder::new(&other_path, 0u64.into()).open()?;
                     webgraph.merge(other)?;
                 }
 
-                if merge_all_segments {
-                    webgraph.optimize_read(); // save space in id2node db
-                    webgraph.merge_all_segments(Default::default())?;
-                }
-
-                webgraph.optimize_read();
+                webgraph.optimize_read()?;
             }
             WebgraphOptions::Server { config_path } => {
                 let config: config::WebgraphServerConfig = load_toml_config(config_path);
@@ -454,7 +436,15 @@ fn main() -> Result<()> {
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()?
-                    .block_on(entrypoint::live_index::serve(config))?;
+                    .block_on(entrypoint::live_index::search_server::serve(config))?;
+            }
+            LiveIndex::Crawler { config_path } => {
+                let config = load_toml_config(config_path);
+
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(entrypoint::live_index::crawler::run(config))?;
             }
         },
         Commands::WebSpell { config_path } => {
@@ -474,22 +464,30 @@ fn main() -> Result<()> {
                     .build()?
                     .block_on(entrypoint::ampc::dht::run(config))?;
             }
+
             AmpcOptions::HarmonicWorker { config_path } => {
                 let config: config::HarmonicWorkerConfig = load_toml_config(config_path);
                 entrypoint::ampc::harmonic_centrality::worker::run(config)?;
             }
+
             AmpcOptions::HarmonicCoordinator { config_path } => {
                 let config: config::HarmonicCoordinatorConfig = load_toml_config(config_path);
                 entrypoint::ampc::harmonic_centrality::coordinator::run(config)?;
             }
 
-            AmpcOptions::ApproxHarmonicWorker { config_path } => {
-                let config: config::ApproxHarmonicWorkerConfig = load_toml_config(config_path);
-                entrypoint::ampc::approximated_harmonic_centrality::worker::run(config)?;
-            }
             AmpcOptions::ApproxHarmonicCoordinator { config_path } => {
                 let config: config::ApproxHarmonicCoordinatorConfig = load_toml_config(config_path);
                 entrypoint::ampc::approximated_harmonic_centrality::coordinator::run(config)?;
+            }
+
+            AmpcOptions::ShortestPathWorker { config_path } => {
+                let config: config::ShortestPathWorkerConfig = load_toml_config(config_path);
+                entrypoint::ampc::shortest_path::worker::run(config)?;
+            }
+
+            AmpcOptions::ShortestPathCoordinator { config_path } => {
+                let config: config::ShortestPathCoordinatorConfig = load_toml_config(config_path);
+                entrypoint::ampc::shortest_path::coordinator::run(config)?;
             }
         },
 
@@ -512,8 +510,8 @@ fn main() -> Result<()> {
                     .block_on(entrypoint::admin::top_keyphrases(top))?;
             }
 
-            AdminOptions::Index(index_options) => match index_options {
-                AdminIndexOptions::Size => {
+            AdminOptions::IndexStats(index_options) => match index_options {
+                AdminIndexStatsOptions::Size => {
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()?

@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -39,11 +39,24 @@ pub struct ImageLink {
 
 /// Flags for the `rel` attribute of the `a` element.
 /// See https://html.spec.whatwg.org/multipage/links.html#linkTypes
-#[derive(Default, Debug, Clone, Copy, bincode::Encode, bincode::Decode, PartialEq, Eq, Hash)]
-pub struct RelFlags(u32);
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Copy,
+    bincode::Encode,
+    bincode::Decode,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Hash,
+    utoipa::ToSchema,
+)]
+pub struct RelFlags(u64);
 
 impl RelFlags {
-    pub fn as_u32(&self) -> u32 {
+    pub fn as_u64(&self) -> u64 {
         self.0
     }
 
@@ -69,6 +82,7 @@ impl RelFlags {
                     "tag" => res |= RelFlags::TAG,
                     "terms-of-service" => res |= RelFlags::TERMS_OF_SERVICE,
                     "sponsored" => res |= RelFlags::SPONSORED,
+                    "ugc" => res |= RelFlags::UGC,
                     _ => {}
                 }
             }
@@ -91,14 +105,14 @@ impl RelFlags {
     }
 }
 
-impl From<u32> for RelFlags {
-    fn from(value: u32) -> Self {
+impl From<u64> for RelFlags {
+    fn from(value: u64) -> Self {
         Self(value)
     }
 }
 
 bitflags! {
-    impl RelFlags: u32 {
+    impl RelFlags: u64 {
         const ALTERNATE = 1 << 0;
         const AUTHOR = 1 << 1;
         const CANONICAL = 1 << 2;
@@ -122,6 +136,7 @@ bitflags! {
         const SCRIPT_TAG = 1 << 19;
         const META_TAG = 1 << 20;
         const SAME_ICANN_DOMAIN = 1 << 21;
+        const UGC = 1 << 22;
     }
 }
 
@@ -185,7 +200,7 @@ impl Html {
                 };
 
                 let image_type = node.attributes.borrow().get("type").map(|t| t.to_string());
-                let link = Url::parse_with_base_url(self.url(), link).ok()?;
+                let link = Url::parse_with_base_url(self.base_url(), link).ok()?;
 
                 let favicon = FaviconLink {
                     link,
@@ -214,7 +229,7 @@ impl Html {
             .and_then(|metadata| {
                 metadata
                     .get("content")
-                    .and_then(|link| Url::parse_with_base_url(self.url(), link).ok())
+                    .and_then(|link| Url::parse_with_base_url(self.base_url(), link).ok())
             })
             .map(|url| ImageLink {
                 url,
@@ -275,11 +290,9 @@ impl Html {
                         if &element.name.local == "a" {
                             if let Some((text, attributes)) = open_links.pop() {
                                 if let Some(dest) = attributes.borrow().get("href") {
-                                    if dest.starts_with("mailto:") || dest.starts_with("tel:") {
-                                        continue;
-                                    }
-
-                                    if let Ok(dest) = Url::parse_with_base_url(self.url(), dest) {
+                                    if let Ok(dest) =
+                                        Url::parse_with_base_url(self.base_url(), dest)
+                                    {
                                         let mut rel = RelFlags::from_html(
                                             &dest,
                                             &attributes.borrow(),
@@ -322,18 +335,8 @@ impl Html {
         }
 
         while let Some((text, attributes)) = open_links.pop() {
-            if let Some(rel) = attributes.borrow().get("rel") {
-                if rel.contains("nofollow") || rel.contains("sponsored") || rel.contains("ugc") {
-                    continue;
-                }
-            }
-
             if let Some(dest) = attributes.borrow().get("href") {
-                if dest.starts_with("mailto:") || dest.starts_with("tel:") {
-                    continue;
-                }
-
-                if let Ok(dest) = Url::parse_with_base_url(self.url(), dest) {
+                if let Ok(dest) = Url::parse_with_base_url(self.base_url(), dest) {
                     let mut rel = RelFlags::from_html(&dest, &attributes.borrow(), &location);
 
                     if icann_domain == dest.icann_domain() {
@@ -362,7 +365,7 @@ impl Html {
         for node in self.root.select("link").unwrap() {
             if let Some(element) = node.as_node().as_element() {
                 if let Some(href) = element.attributes.borrow().get("href") {
-                    if let Ok(href) = Url::parse_with_base_url(self.url(), href) {
+                    if let Ok(href) = Url::parse_with_base_url(self.base_url(), href) {
                         let mut rel =
                             RelFlags::from_html(&href, &element.attributes.borrow(), &location);
 
@@ -407,7 +410,7 @@ impl Html {
                     ) {
                         if let Some(content) = metadata.get("content") {
                             if let Ok(destination) =
-                                Url::parse_with_base_url(self.url(), content.as_str())
+                                Url::parse_with_base_url(self.base_url(), content.as_str())
                             {
                                 let mut rel = location.as_rel();
 
@@ -438,7 +441,7 @@ impl Html {
                     ) {
                         if let Some(content) = metadata.get("content") {
                             if let Ok(destination) =
-                                Url::parse_with_base_url(self.url(), content.as_str())
+                                Url::parse_with_base_url(self.base_url(), content.as_str())
                             {
                                 let mut rel = location.as_rel();
 
@@ -470,7 +473,8 @@ impl Html {
         links.extend(self.scripts().into_iter().filter_map(|script| {
             match script.attributes.get("src") {
                 Some(url) => {
-                    let script_url = Url::parse_with_base_url(self.url(), url.as_str()).ok()?;
+                    let script_url =
+                        Url::parse_with_base_url(self.base_url(), url.as_str()).ok()?;
 
                     if script_url.root_domain() != root_domain {
                         let mut rel = Location::SCRIPT.as_rel();

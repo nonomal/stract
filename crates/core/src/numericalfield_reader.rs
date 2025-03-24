@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -28,7 +28,7 @@ use crate::{
 
 #[derive(Default)]
 struct InnerNumericalFieldReader {
-    segments: HashMap<SegmentId, Arc<SegmentReader>>,
+    segments: HashMap<SegmentId, SegmentReader>,
 }
 
 #[derive(Default, Clone)]
@@ -37,12 +37,8 @@ pub struct NumericalFieldReader {
 }
 
 impl NumericalFieldReader {
-    pub fn get_segment(&self, segment: &SegmentId) -> Arc<SegmentReader> {
-        Arc::clone(self.inner.segments.get(segment).unwrap())
-    }
-
     pub fn borrow_segment(&self, segment: &SegmentId) -> &SegmentReader {
-        self.inner.segments.get(segment).unwrap()
+        self.inner.segments.get(segment).as_ref().unwrap()
     }
 }
 
@@ -55,6 +51,7 @@ impl NumericalFieldReader {
             let columnfield_readers = reader.column_fields();
 
             let mut u64s = EnumMap::new();
+            let mut u128s = EnumMap::new();
             let mut bytes = EnumMap::new();
             let mut bools = EnumMap::new();
             let mut f64s = EnumMap::new();
@@ -64,6 +61,11 @@ impl NumericalFieldReader {
                     DataType::U64 => {
                         if let Ok(reader) = columnfield_readers.u64(field.name()) {
                             u64s.insert(field, reader.values);
+                        }
+                    }
+                    DataType::U128 => {
+                        if let Ok(reader) = columnfield_readers.u128(field.name()) {
+                            u128s.insert(field, reader.values);
                         }
                     }
                     DataType::F64 => {
@@ -91,16 +93,18 @@ impl NumericalFieldReader {
 
             segments.insert(
                 reader.segment_id(),
-                Arc::new(SegmentReader {
+                SegmentReader {
                     row_reader: reader.row_fields().clone(),
                     columnar_readers: ColumnarReaders {
                         u64s,
+                        u128s,
                         bytes,
                         bools,
                         f64s,
                     },
                     field_ids,
-                }),
+                    row: None,
+                },
             );
         }
 
@@ -110,8 +114,10 @@ impl NumericalFieldReader {
     }
 }
 
+#[derive(Clone)]
 struct ColumnarReaders {
     u64s: EnumMap<NumericalFieldEnum, Arc<dyn ColumnValues<u64>>>,
+    u128s: EnumMap<NumericalFieldEnum, Arc<dyn ColumnValues<u128>>>,
     f64s: EnumMap<NumericalFieldEnum, Arc<dyn ColumnValues<f64>>>,
     bools: EnumMap<NumericalFieldEnum, Arc<dyn ColumnValues<bool>>>,
     bytes: EnumMap<NumericalFieldEnum, tantivy::columnar::BytesColumn>,
@@ -119,6 +125,7 @@ struct ColumnarReaders {
 
 pub enum Value {
     U64(u64),
+    U128(u128),
     F64(f64),
     Bytes(Vec<u8>),
     Bool(bool),
@@ -128,6 +135,13 @@ impl Value {
     pub fn as_u64(&self) -> Option<u64> {
         match self {
             Value::U64(val) => Some(*val),
+            _ => None,
+        }
+    }
+
+    pub fn as_u128(&self) -> Option<u128> {
+        match self {
+            Value::U128(val) => Some(*val),
             _ => None,
         }
     }
@@ -157,6 +171,12 @@ impl Value {
 impl From<u64> for Value {
     fn from(val: u64) -> Self {
         Value::U64(val)
+    }
+}
+
+impl From<u128> for Value {
+    fn from(val: u128) -> Self {
+        Value::U128(val)
     }
 }
 
@@ -207,12 +227,12 @@ impl From<Value> for Option<bool> {
 
 pub struct FieldReader<'a> {
     columnar_readers: &'a ColumnarReaders,
-    row: Option<tantivy::roworder::Row<'a>>,
+    row: Option<&'a tantivy::roworder::Row>,
     field_ids: &'a EnumMap<NumericalFieldEnum, u32>,
     doc: DocId,
 }
 
-impl<'a> FieldReader<'a> {
+impl FieldReader<'_> {
     pub fn get(&self, field: NumericalFieldEnum) -> Option<Value> {
         if field.orientation().contains(Orientation::ROW) {
             let field_id = self.field_ids.get(field)?;
@@ -221,6 +241,7 @@ impl<'a> FieldReader<'a> {
                 DataType::U64 => row.get_u64(field_id).map(Value::U64),
                 DataType::F64 => row.get_f64(field_id).map(Value::F64),
                 DataType::Bool => row.get_bool(field_id).map(Value::Bool),
+                DataType::U128 => row.get_u128(field_id).map(Value::U128),
                 DataType::Bytes => unimplemented!("bytes fields cannot be row oriented"),
             })
         } else if field.orientation().contains(Orientation::COLUMNAR) {
@@ -232,7 +253,13 @@ impl<'a> FieldReader<'a> {
                         .get_val(self.doc)
                         .into(),
                 ),
-
+                DataType::U128 => Some(
+                    self.columnar_readers
+                        .u128s
+                        .get(field)?
+                        .get_val(self.doc)
+                        .into(),
+                ),
                 DataType::F64 => Some(
                     self.columnar_readers
                         .f64s
@@ -273,20 +300,47 @@ impl<'a> FieldReader<'a> {
     }
 }
 
+struct Row {
+    doc: DocId,
+    row: tantivy::roworder::Row,
+}
+
 pub struct SegmentReader {
     columnar_readers: ColumnarReaders,
     row_reader: tantivy::roworder::readers::RowFieldReaders,
     field_ids: EnumMap<NumericalFieldEnum, u32>,
+    row: Option<Row>,
+}
+
+impl Clone for SegmentReader {
+    fn clone(&self) -> Self {
+        Self {
+            columnar_readers: self.columnar_readers.clone(),
+            row_reader: self.row_reader.clone(),
+            field_ids: self.field_ids.clone(),
+            row: None,
+        }
+    }
 }
 
 impl SegmentReader {
+    pub fn prepare_row_for_doc(&mut self, doc: DocId) {
+        self.row = Some(Row {
+            doc,
+            row: self.row_reader.row_index().get_row(doc as usize).unwrap(),
+        });
+    }
+
     pub fn get_field_reader(&self, doc: DocId) -> FieldReader<'_> {
-        let row = self.row_reader.row_index().get_row(doc as usize);
+        debug_assert!(
+            self.row.as_ref().map(|r| r.doc == doc).unwrap_or(true),
+            "Row prepared for wrong doc"
+        );
 
         FieldReader {
             columnar_readers: &self.columnar_readers,
             field_ids: &self.field_ids,
-            row,
+            row: self.row.as_ref().map(|r| &r.row),
             doc,
         }
     }

@@ -14,6 +14,10 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+//! The recall stage of the ranking pipeline.
+//!
+//! This stage focusses on getting the best pages into the precision stage.
+
 use std::sync::Arc;
 
 use crate::{
@@ -37,7 +41,7 @@ use crate::{
         SignalCalculation, SignalComputer, SignalEnum,
     },
     schema::{numerical_field, text_field},
-    searcher::{api, SearchQuery},
+    searcher::{ScoredWebpagePointer, SearchQuery},
     webgraph,
 };
 
@@ -162,9 +166,10 @@ impl LocalRecallRankingWebpage {
     /// the index to calculate bm25.
     pub fn new(
         pointer: WebpagePointer,
-        columnfield_reader: &numericalfield_reader::SegmentReader,
+        columnfield_reader: &mut numericalfield_reader::SegmentReader,
         computer: &mut SignalComputer,
     ) -> Self {
+        columnfield_reader.prepare_row_for_doc(pointer.address.doc_id);
         let columnfields = columnfield_reader.get_field_reader(pointer.address.doc_id);
 
         let title_embedding: Option<Vec<u8>> = columnfields
@@ -178,7 +183,7 @@ impl LocalRecallRankingWebpage {
         let host_id = columnfields
             .get(numerical_field::HostNodeID.into())
             .unwrap()
-            .as_u64()
+            .as_u128()
             .unwrap()
             .into();
 
@@ -295,7 +300,7 @@ impl collector::Doc for LocalRecallRankingWebpage {
     }
 }
 
-impl RankingPipeline<api::ScoredWebpagePointer> {
+impl RankingPipeline<ScoredWebpagePointer> {
     pub fn recall_stage(
         query: &SearchQuery,
         inbound: inbound_similarity::Scorer,
@@ -306,15 +311,17 @@ impl RankingPipeline<api::ScoredWebpagePointer> {
             .add_stage(term_distance::TitleDistanceScorer)
             .add_stage(term_distance::BodyDistanceScorer)
             .add_stage(
-                EmbeddingScorer::<api::ScoredWebpagePointer, TitleEmbeddings>::new(
+                EmbeddingScorer::<ScoredWebpagePointer, TitleEmbeddings>::new(
                     query.text().to_string(),
                     dual_encoder.clone(),
                 ),
             )
-            .add_stage(EmbeddingScorer::<
-                api::ScoredWebpagePointer,
-                KeywordEmbeddings,
-            >::new(query.text().to_string(), dual_encoder))
+            .add_stage(
+                EmbeddingScorer::<ScoredWebpagePointer, KeywordEmbeddings>::new(
+                    query.text().to_string(),
+                    dual_encoder,
+                ),
+            )
             .add_stage(InboundScorer::new(inbound))
             .add_modifier(modifiers::InboundSimilarity);
 

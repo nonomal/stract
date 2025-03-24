@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! The inverted index is the main data structure of the search engine.
+//!
 //! It is a mapping from terms to a list of documents. Imagine a hash map
 //! { term -> \[doc1, doc2, doc3\] } etc. During search, we look up the terms
 //! from the query in the index and perform an intersection of the lists of
@@ -31,7 +32,6 @@ mod key_phrase;
 mod retrieved_webpage;
 mod search;
 
-pub use indexing::merge_tantivy_segments;
 pub use key_phrase::KeyPhrase;
 pub use retrieved_webpage::RetrievedWebpage;
 
@@ -82,17 +82,58 @@ pub struct WebpagePointer {
     Clone,
     Copy,
     PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+pub enum ShardId {
+    Live(u64),
+    Backbone(u64),
+}
+
+impl std::fmt::Display for ShardId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Live(shard) => write!(f, "Live {}", shard),
+            Self::Backbone(shard) => write!(f, "Backbone {}", shard),
+        }
+    }
+}
+
+#[derive(
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    bincode::Encode,
+    bincode::Decode,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
 )]
 pub struct DocAddress {
     pub segment: u32,
     pub doc_id: u32,
+    pub shard_id: ShardId,
 }
 
-impl From<tantivy::DocAddress> for DocAddress {
-    fn from(address: tantivy::DocAddress) -> Self {
+impl DocAddress {
+    pub fn new(segment: u32, doc_id: u32, shard_id: ShardId) -> Self {
+        Self {
+            segment,
+            doc_id,
+            shard_id,
+        }
+    }
+
+    pub fn from_tantivy(address: tantivy::DocAddress, shard_id: ShardId) -> Self {
         Self {
             segment: address.segment_ord,
             doc_id: address.doc_id,
+            shard_id,
         }
     }
 }
@@ -140,6 +181,7 @@ pub struct InvertedIndex {
     schema: Arc<Schema>,
     snippet_config: SnippetConfig,
     columnfield_reader: NumericalFieldReader,
+    shard_id: Option<ShardId>,
 }
 
 impl InvertedIndex {
@@ -180,7 +222,27 @@ impl InvertedIndex {
             tantivy_index,
             snippet_config: SnippetConfig::default(),
             columnfield_reader,
+            shard_id: None,
         })
+    }
+
+    pub fn set_shard_id(&mut self, shard_id: ShardId) {
+        self.shard_id = Some(shard_id);
+    }
+
+    pub fn re_open(&mut self) -> Result<()> {
+        let shard_id = self.shard_id();
+        *self = Self::open(self.path.clone())?;
+
+        if let Some(shard_id) = shard_id {
+            self.set_shard_id(shard_id);
+        }
+
+        Ok(())
+    }
+
+    pub fn shard_id(&self) -> Option<ShardId> {
+        self.shard_id
     }
 
     pub fn columnfield_reader(&self) -> NumericalFieldReader {
@@ -189,10 +251,6 @@ impl InvertedIndex {
 
     pub fn set_snippet_config(&mut self, config: SnippetConfig) {
         self.snippet_config = config;
-    }
-
-    pub fn tokenizers(&self) -> &TokenizerManager {
-        self.tantivy_index.tokenizers()
     }
 
     pub fn schema(&self) -> Arc<Schema> {
@@ -216,13 +274,14 @@ impl InvertedIndex {
     }
 
     #[cfg(test)]
-    pub fn temporary() -> Result<Self> {
-        let path = crate::gen_temp_path();
-        let mut s = Self::open(path)?;
+    pub fn temporary() -> Result<(Self, file_store::temp::TempDir)> {
+        let dir = crate::gen_temp_dir()?;
+        let mut s = Self::open(dir.as_ref().join("index"))?;
+        s.set_shard_id(ShardId::Live(0));
 
         s.prepare_writer()?;
 
-        Ok(s)
+        Ok((s, dir))
     }
 }
 
@@ -236,16 +295,16 @@ pub struct SearchResult {
 mod tests {
     use candle_core::Tensor;
     use maplit::hashmap;
-    use url::Url;
 
     use crate::{
         collector::MainCollector,
         config::CollectorConfig,
+        generic_query::{GetHomepageQuery, GetWebpageQuery},
         query::Query,
         ranking::{LocalRanker, SignalComputer},
         search_ctx::Ctx,
         searcher::SearchQuery,
-        webgraph::{Edge, NodeDatum},
+        webgraph::{NodeID, SmallEdgeWithLabel},
         webpage::{schema_org, Html, Webpage},
         OneOrMany,
     };
@@ -274,7 +333,7 @@ mod tests {
 
     #[test]
     fn simple_search() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
         let ctx = index.local_search_ctx();
 
         let query = Query::parse(
@@ -333,7 +392,7 @@ mod tests {
 
     #[test]
     fn document_not_matching() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -381,7 +440,7 @@ mod tests {
 
     #[test]
     fn english_stemming() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -429,7 +488,7 @@ mod tests {
 
     #[test]
     fn stemmed_query_english() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -477,7 +536,7 @@ mod tests {
 
     #[test]
     fn not_searchable_backlinks() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -520,11 +579,11 @@ mod tests {
             ..Default::default()
         };
 
-        webpage.set_backlinks(vec![Edge {
-            from: NodeDatum::new(0u64, 0),
-            to: NodeDatum::new(1u64, 0),
+        webpage.set_backlinks(vec![SmallEdgeWithLabel {
+            from: NodeID::from(0u64),
+            to: NodeID::from(1u64),
             label: "B site is great".to_string(),
-            rel: Default::default(),
+            rel_flags: Default::default(),
         }]);
 
         index.insert(&webpage).expect("failed to insert webpage");
@@ -560,7 +619,7 @@ mod tests {
 
     #[test]
     fn limited_top_docs() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         for _ in 0..100 {
             let dedup_s = crate::rand_words(100);
@@ -612,7 +671,7 @@ mod tests {
 
     #[test]
     fn host_search() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -660,7 +719,7 @@ mod tests {
 
     #[test]
     fn merge() {
-        let index1 = InvertedIndex::temporary().expect("Unable to open index");
+        let (index1, _dir1) = InvertedIndex::temporary().expect("Unable to open index");
 
         index1
             .insert(
@@ -684,7 +743,7 @@ mod tests {
             )
             .expect("failed to insert webpage");
 
-        let index2 = InvertedIndex::temporary().expect("Unable to open index");
+        let (index2, _dir2) = InvertedIndex::temporary().expect("Unable to open index");
 
         index2
             .insert(
@@ -737,7 +796,7 @@ mod tests {
 
     #[test]
     fn match_across_fields() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         let ctx = index.local_search_ctx();
         let query = Query::parse(
@@ -795,7 +854,7 @@ mod tests {
 
     #[test]
     fn id_links_removed_during_indexing() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -843,7 +902,7 @@ mod tests {
 
     #[test]
     fn schema_org_stored() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage::test_parse(
@@ -922,7 +981,7 @@ mod tests {
 
     #[test]
     fn get_webpage() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage::test_parse(
@@ -949,14 +1008,18 @@ mod tests {
 
         index.commit().expect("failed to commit index");
 
-        let webpage = index.get_webpage("https://www.example.com").unwrap();
+        let webpage = index
+            .search_generic(&GetWebpageQuery::new("https://www.example.com"))
+            .unwrap()
+            .unwrap();
+
         assert_eq!(webpage.title, "News website".to_string());
         assert_eq!(webpage.url, "https://www.example.com/".to_string());
     }
 
     #[test]
     fn get_homepage() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(&Webpage::test_parse(
@@ -985,7 +1048,8 @@ mod tests {
         index.commit().expect("failed to commit index");
 
         let webpage = index
-            .get_homepage(&Url::parse("https://www.example.com").unwrap())
+            .search_generic(&GetHomepageQuery::new("https://www.example.com"))
+            .unwrap()
             .unwrap();
         assert_eq!(webpage.title, "News website".to_string());
         assert_eq!(webpage.url, "https://www.example.com/".to_string());
@@ -993,7 +1057,7 @@ mod tests {
 
     #[test]
     fn test_title_embeddings_stored() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         let mut webpage = Webpage::test_parse(
             &format!(
@@ -1081,7 +1145,7 @@ mod tests {
 
     #[test]
     fn test_approximate_count() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         let webpage = Webpage::test_parse(
             &format!(
@@ -1139,7 +1203,7 @@ mod tests {
 
     #[test]
     fn test_search_special_characters() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         let webpage = Webpage::test_parse(
             &format!(
@@ -1196,7 +1260,7 @@ mod tests {
 
     #[test]
     fn test_unicode_normalization() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         let webpage = Webpage::test_parse(
             &format!(

@@ -68,10 +68,10 @@ impl<T> StageOrModifier<T>
 where
     T: RankableWebpage + Send + Sync,
 {
-    fn top_n(&self) -> Top {
+    fn top(&self) -> Top {
         match self {
-            StageOrModifier::Stage(stage) => stage.top_n(),
-            StageOrModifier::Modifier(modifier) => modifier.top_n(),
+            StageOrModifier::Stage(stage) => stage.top(),
+            StageOrModifier::Modifier(modifier) => modifier.top(),
         }
     }
 
@@ -139,7 +139,7 @@ where
         let coefficients = query.signal_coefficients();
 
         for stage_or_modifier in self.stages_or_modifiers.iter() {
-            let webpages = if let Top::Limit(top_n) = stage_or_modifier.top_n() {
+            let webpages = if let Top::Limit(top_n) = stage_or_modifier.top() {
                 if query.offset() > top_n {
                     continue;
                 }
@@ -167,23 +167,22 @@ mod tests {
     use scorers::term_distance;
 
     use crate::{
-        ampc::dht::ShardId,
         collector::Hashes,
-        inverted_index::{DocAddress, WebpagePointer},
+        inverted_index::{DocAddress, ShardId, WebpagePointer},
         prehashed::Prehashed,
         ranking::{self, bitvec_similarity::BitVec, initial::Score},
-        searcher::api,
+        searcher::ScoredWebpagePointer,
     };
 
     use super::*;
 
-    fn pipeline() -> RankingPipeline<api::ScoredWebpagePointer> {
+    fn pipeline() -> RankingPipeline<ScoredWebpagePointer> {
         RankingPipeline::new()
             .add_stage(term_distance::TitleDistanceScorer)
             .add_stage(term_distance::BodyDistanceScorer)
     }
 
-    fn sample_websites(n: usize) -> Vec<api::ScoredWebpagePointer> {
+    fn sample_websites(n: usize) -> Vec<ScoredWebpagePointer> {
         (0..n)
             .map(|i| -> LocalRecallRankingWebpage {
                 let pointer = WebpagePointer {
@@ -195,10 +194,7 @@ mod tests {
                         url_without_tld: Prehashed(0),
                         simhash: 0,
                     },
-                    address: DocAddress {
-                        segment: 0,
-                        doc_id: i as u32,
-                    },
+                    address: DocAddress::new(0, i as u32, ShardId::Backbone(0)),
                 };
 
                 let mut signals = EnumMap::new();
@@ -210,13 +206,9 @@ mod tests {
                 signals.insert(ranking::signals::HostCentrality.into(), calc);
                 LocalRecallRankingWebpage::new_testing(pointer, signals, calc.score)
             })
-            .map(|local| {
-                api::ScoredWebpagePointer::Normal(
-                    crate::searcher::distributed::ScoredWebpagePointer {
-                        website: RecallRankingWebpage::new(local, BitVec::new(vec![])),
-                        shard: ShardId::new(0),
-                    },
-                )
+            .map(|local| ScoredWebpagePointer {
+                website: RecallRankingWebpage::new(local, BitVec::new(vec![])),
+                shard: ShardId::Backbone(0),
             })
             .collect()
     }

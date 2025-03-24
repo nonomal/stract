@@ -85,9 +85,8 @@ pub struct WalIterator<T> {
 
 impl<T> WalIterator<T> {
     pub fn open<P: AsRef<Path>>(file: P) -> Result<Self> {
-        Ok(Self {
-            iter: file_store::iterable::IterableStoreReader::open(file)?,
-        })
+        let iter = file_store::iterable::IterableStoreReader::open(file)?;
+        Ok(Self { iter })
     }
 }
 
@@ -109,7 +108,8 @@ mod tests {
 
     #[test]
     fn test_write_read() -> Result<()> {
-        let mut writer = Wal::open(file_store::gen_temp_path())?;
+        let temp_dir = file_store::gen_temp_dir().unwrap();
+        let mut writer = Wal::open(temp_dir.as_ref().join("test-wal"))?;
 
         writer.write(&1u64)?;
         writer.write(&2u64)?;
@@ -130,7 +130,8 @@ mod tests {
 
     #[test]
     fn test_empty_write() -> Result<()> {
-        let writer: Wal<u64> = Wal::open(file_store::gen_temp_path())?;
+        let temp_dir = file_store::gen_temp_dir().unwrap();
+        let writer: Wal<u64> = Wal::open(temp_dir.as_ref().join("test-wal"))?;
 
         let res: Vec<_> = writer.iter()?.collect();
 
@@ -141,7 +142,8 @@ mod tests {
 
     #[test]
     fn test_clear() -> Result<()> {
-        let mut writer = Wal::open(file_store::gen_temp_path())?;
+        let temp_dir = file_store::gen_temp_dir().unwrap();
+        let mut writer = Wal::open(temp_dir.as_ref().join("test-wal"))?;
 
         writer.write(&1u64)?;
         writer.write(&2u64)?;

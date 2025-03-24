@@ -86,7 +86,7 @@
           bind:this={button}
           on:click|stopPropagation={() => dispatch('modal', button)}
         >
-          <AdjustVertical class="text-md" />
+          <AdjustVertical class="text-md" aria-label="3 vertical bars" />
         </button>
       </div>
     </div>
@@ -97,8 +97,8 @@
           answers={webpage.richSnippet.answers}
         />
       {:else}
-        <div class="line-clamp-4 md:line-clamp-3">
-          <div class="inline">
+        <span class="line-clamp-4 md:line-clamp-3">
+          <span class="inline">
             <span id="snippet-text" class="snippet-text">
               {#if webpage.likelyHasAds && $markPagesWithAdsStore && webpage.likelyHasPaywall && $markPagesWithPaywallStore}
                 <span
@@ -131,8 +131,8 @@
                 <TextSnippet snippet={webpage.snippet.text} />
               </span>
             </span>
-          </div>
-        </div>
+          </span>
+        </span>
       {/if}
     </p>
   </div>

@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -22,23 +22,23 @@ use crate::query::Query;
 use crate::tokenizer::fields::{
     BigramTokenizer, DefaultTokenizer, FieldTokenizer, Stemmed, TrigramTokenizer,
 };
-use crate::web_spell::sentence_ranges;
 use crate::webpage::region::Region;
 use hashbrown::{HashMap, HashSet};
 use lending_iter::LendingIterator;
 use utoipa::ToSchema;
+use web_spell::sentence_ranges;
 
 use itertools::Itertools;
 use whatlang::Lang;
 
-/// For now we use an algorithm similar to the `UnifiedHighlighter` in lucene <https://lucene.apache.org/core/7_3_1/highlighter/org/apache/lucene/search/uhighlight/UnifiedHighlighter.html>.
-/// The document text is treated as the entire corpus, and each passage is scored as a document in this corpus using BM25.
-/// The top scoring passage is used as the start of a snippet, maybe combined with the subsequent passage(s) in order to
-/// reach the desired snippet length.
-///
-/// In the future we want to implement something closer to the method described in <https://cs.pomona.edu/~dkauchak/ir_project/whitepapers/Snippet-IL.pdf>.
-/// This might require us to store each paragraph of the webpage separately to get adequate performance (maybe we can split passages online with adequate performance
-/// but we need to test this).
+// For now we use an algorithm similar to the `UnifiedHighlighter` in lucene <https://lucene.apache.org/core/7_3_1/highlighter/org/apache/lucene/search/uhighlight/UnifiedHighlighter.html>.
+// The document text is treated as the entire corpus, and each passage is scored as a document in this corpus using BM25.
+// The top scoring passage is used as the start of a snippet, maybe combined with the subsequent passage(s) in order to
+// reach the desired snippet length.
+//
+// In the future we want to implement something closer to the method described in <https://cs.pomona.edu/~dkauchak/ir_project/whitepapers/Snippet-IL.pdf>.
+// This might require us to store each paragraph of the webpage separately to get adequate performance (maybe we can split passages online with adequate performance
+// but we need to test this).
 
 const K1: f64 = 1.2;
 const B: f64 = 0.75;
@@ -349,6 +349,8 @@ pub fn generate(query: &Query, text: &str, region: &Region, config: SnippetConfi
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::{
         index::Index,
@@ -357,6 +359,7 @@ mod tests {
         webpage::Webpage,
     };
     use proptest::prelude::*;
+    use tokio::sync::RwLock;
 
     const TEST_TEXT: &str = r#"Rust is a systems programming language sponsored by
 Mozilla which describes it as a "safe, concurrent, practical language", supporting functional and
@@ -389,7 +392,7 @@ Survey in 2016, 2017, and 2018."#;
 
     #[test]
     fn snippet_during_search() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -413,10 +416,10 @@ Survey in 2016, 2017, and 2018."#;
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
 
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "rust language".to_string(),
                 ..Default::default()
             })
@@ -428,7 +431,7 @@ Survey in 2016, 2017, and 2018."#;
 
     #[test]
     fn stemmed_words_snippet_highlight() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -452,10 +455,10 @@ Survey in 2016, 2017, and 2018."#;
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
 
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "describe".to_string(),
                 ..Default::default()
             })
@@ -467,7 +470,7 @@ Survey in 2016, 2017, and 2018."#;
 
     #[test]
     fn test_stemmed_term() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -491,10 +494,10 @@ Survey in 2016, 2017, and 2018."#;
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
 
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let result = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "paradigms".to_string(),
                 ..Default::default()
             })

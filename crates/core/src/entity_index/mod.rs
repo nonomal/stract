@@ -34,7 +34,6 @@ use tantivy::{
 
 use crate::{
     image_store::{EntityImageStore, Image, ImageStore},
-    inverted_index::merge_tantivy_segments,
     tokenizer::fields::DefaultTokenizer,
     Result,
 };
@@ -249,11 +248,7 @@ impl EntityIndex {
                 })
                 .filter(|entity_match| {
                     if let Some(image_id) = &entity_match.entity.image_id {
-                        let res = !images.contains(image_id);
-
-                        images.insert(image_id.clone());
-
-                        res
+                        images.insert(image_id.clone())
                     } else {
                         false
                     }
@@ -418,7 +413,7 @@ impl EntityIndex {
         let base_path = Path::new(&self.path);
         let segments: Vec<_> = self.tv_index.load_metas()?.segments.into_iter().collect();
 
-        merge_tantivy_segments(
+        tantivy::merge_segments(
             self.writer.as_mut().expect("writer has not been prepared"),
             segments,
             base_path,
@@ -435,7 +430,8 @@ mod tests {
 
     #[test]
     fn stopwords_title_ignored() {
-        let mut index = EntityIndex::open(crate::gen_temp_path()).unwrap();
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut index = EntityIndex::open(&temp_dir).unwrap();
         index.prepare_writer();
 
         index.insert(Entity {
@@ -465,7 +461,8 @@ mod tests {
 
     #[test]
     fn image() {
-        let mut index = EntityIndex::open(crate::gen_temp_path()).unwrap();
+        let temp_dir = crate::gen_temp_dir().unwrap();
+        let mut index = EntityIndex::open(&temp_dir).unwrap();
         index.prepare_writer();
 
         index.insert(Entity {

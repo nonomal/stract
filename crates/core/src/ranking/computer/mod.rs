@@ -14,6 +14,19 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+//! The ranking computer is responsible for computing the core ranking signals for
+//! each potential page in the result set. This module handles the initial ranking phase
+//! that runs independently on each search node in the distributed search cluster.
+//!
+//! The computer evaluates a set of core ranking signals for each candidate page,
+//! including text-based relevance scores like BM25 and authority scores (harmonic centrality).
+//! These signals are combined using a linear model to produce an initial ranking score.
+//! The top pages are passed to the coordinator node for the final ranking phase.
+//!
+//! The core signals computed here are designed to be fast to calculate while still
+//! providing strong relevance signals. More expensive ranking features are deferred
+//! to the final ranking phase on the coordinator.
+
 use crate::query::optic::AsSearchableRule;
 use crate::query::{Query, MAX_TERMS_FOR_NGRAM_LOOKUPS};
 use crate::ranking::bm25f::MultiBm25FWeight;
@@ -160,7 +173,7 @@ pub struct OpticBoosts {
 pub struct SegmentReader {
     text_fields: EnumMap<TextFieldEnum, TextFieldData>,
     optic_boosts: OpticBoosts,
-    numericalfield_reader: Arc<numericalfield_reader::SegmentReader>,
+    numericalfield_reader: numericalfield_reader::SegmentReader,
 }
 
 impl SegmentReader {
@@ -170,6 +183,10 @@ impl SegmentReader {
 
     pub fn numericalfield_reader(&self) -> &numericalfield_reader::SegmentReader {
         &self.numericalfield_reader
+    }
+
+    pub fn prepare_for_doc(&mut self, doc: DocId) {
+        self.numericalfield_reader.prepare_row_for_doc(doc);
     }
 }
 
@@ -242,7 +259,9 @@ impl SignalComputer {
             .collect();
 
         let update_time_cache = (0..(3 * 365 * 24))
-            .map(|hours_since_update| 1.0 / ((hours_since_update as f64 + 1.0).log2()))
+            .map(|hours_since_update| {
+                super::signals::time_cache_calculation(hours_since_update as f64)
+            })
             .collect();
 
         let query = query.as_ref().map(|q| QueryData {
@@ -288,6 +307,8 @@ impl SignalComputer {
 
         if let Some(query) = &self.query_data {
             if !query.simple_terms.is_empty() {
+                let mut bm25f_weight_cache = super::bm25f::WeightCache::new();
+
                 for signal in CoreSignalEnum::all() {
                     if let Some((text_field, tv_field)) = signal
                         .as_textfield()
@@ -306,13 +327,18 @@ impl SignalComputer {
                         .collect::<String>();
 
                         let mut terms = Vec::new();
+                        let mut bm25f_terms = Vec::new();
                         let mut tokenizer = text_field.query_tokenizer(query.lang.as_ref());
                         let mut stream = tokenizer.token_stream(&simple_query);
                         let mut it = tantivy::tokenizer::TokenStream::iter(&mut stream);
 
                         while let Some(token) = it.next() {
                             let term = tantivy::Term::from_field_text(tv_field, &token.text);
-                            terms.push(term);
+                            terms.push(term.clone());
+                            bm25f_terms.push(super::bm25f::PreparedTerm::new(
+                                term,
+                                bm25f_weight_cache.get(&token.text, tv_searcher),
+                            ));
                         }
 
                         if terms.is_empty() {
@@ -339,7 +365,7 @@ impl SignalComputer {
                         )?;
                         let bm25f = MultiBm25FWeight::for_terms(
                             tv_searcher,
-                            &terms,
+                            &bm25f_terms,
                             text_field.bm25_constants(),
                         );
 
@@ -401,8 +427,9 @@ impl SignalComputer {
         segment_reader: &tantivy::SegmentReader,
         numericalfield_reader: &numericalfield_reader::NumericalFieldReader,
     ) -> Result<()> {
-        let numericalfield_segment_reader =
-            numericalfield_reader.get_segment(&segment_reader.segment_id());
+        let numericalfield_segment_reader = numericalfield_reader
+            .borrow_segment(&segment_reader.segment_id())
+            .clone();
         let text_fields = self.prepare_textfields(tv_searcher, segment_reader)?;
         let optic_rule_boosts =
             self.prepare_optic(tv_searcher, segment_reader, numericalfield_reader);

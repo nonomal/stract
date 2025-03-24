@@ -14,7 +14,6 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>
 
-use super::key_phrase::KeyPhrase;
 use super::{DocAddress, InitialSearchResult, InvertedIndex, RetrievedWebpage, WebpagePointer};
 use itertools::Itertools;
 use tantivy::collector::Count;
@@ -27,18 +26,20 @@ use url::Url;
 use crate::collector::approx_count::ApproxCount;
 use crate::collector::{approx_count, MainCollector};
 
+use crate::generic_query::{self, Collector as _, GenericQuery};
 use crate::highlighted::HighlightedFragment;
 use crate::numericalfield_reader::NumericalFieldReader;
-use crate::query::shortcircuit::ShortCircuitQuery;
 use crate::query::Query;
 use crate::ranking::pipeline::LocalRecallRankingWebpage;
 use crate::ranking::SignalComputer;
-use crate::schema::{numerical_field, text_field, Field, NumericalFieldEnum, TextFieldEnum};
+use crate::schema::{numerical_field, text_field, Field, NumericalFieldEnum};
 use crate::search_ctx::Ctx;
 use crate::snippet;
 use crate::snippet::TextSnippet;
 use crate::webgraph::NodeID;
+use tantivy::query::ShortCircuitQuery;
 
+use crate::schema::text_field::TextField;
 use crate::webpage::url_ext::UrlExt;
 use crate::Result;
 
@@ -60,7 +61,7 @@ impl InvertedIndex {
         }
 
         let simple_terms = query.simple_terms().to_vec();
-        let mut query: Box<dyn tantivy::query::Query> = Box::new(query.clone());
+        let query: Box<dyn tantivy::query::Query> = Box::new(query.clone());
 
         if let Some(limit) = collector.top_docs().max_docs().cloned() {
             if limit.segments == 0 {
@@ -71,7 +72,8 @@ impl InvertedIndex {
             }
 
             let docs_per_segment = (limit.total_docs / limit.segments) as u64;
-            query = Box::new(ShortCircuitQuery::new(query, docs_per_segment));
+            let query: Box<dyn tantivy::query::Query> =
+                Box::new(ShortCircuitQuery::new(query, docs_per_segment));
 
             let (count, pointers) = ctx.tv_searcher.search(
                 &query,
@@ -95,6 +97,7 @@ impl InvertedIndex {
     pub fn local_search_ctx(&self) -> Ctx {
         let tv_searcher = self.tv_searcher();
         Ctx {
+            shard_id: self.shard_id.expect("Shard ID should be set for searches"),
             columnfield_reader: self.columnfield_reader.clone(),
             tv_searcher,
         }
@@ -125,7 +128,12 @@ impl InvertedIndex {
                 .then_with(|| a.1.address.doc_id.cmp(&b.1.address.doc_id))
         });
 
+        if pointers.is_empty() {
+            return Ok(vec![]);
+        }
+
         let mut prev_segment = None;
+        let mut numeric_segment_reader = None;
         for (orig_index, pointer) in pointers {
             let update_segment = match prev_segment {
                 Some(prev_segment) if prev_segment != pointer.address.segment => true,
@@ -136,6 +144,11 @@ impl InvertedIndex {
             let segment_reader = ctx.tv_searcher.segment_reader(pointer.address.segment);
             if update_segment {
                 computer.register_segment(&ctx.tv_searcher, segment_reader, columnfield_reader)?;
+                numeric_segment_reader = Some(
+                    columnfield_reader
+                        .borrow_segment(&segment_reader.segment_id())
+                        .clone(),
+                );
             }
 
             prev_segment = Some(pointer.address.segment);
@@ -144,7 +157,7 @@ impl InvertedIndex {
                 orig_index,
                 LocalRecallRankingWebpage::new(
                     pointer,
-                    columnfield_reader.borrow_segment(&segment_reader.segment_id()),
+                    numeric_segment_reader.as_mut().unwrap(),
                     &mut computer,
                 ),
             ));
@@ -169,9 +182,9 @@ impl InvertedIndex {
             )
             .unwrap();
 
-        let id = doc.get_first(field).unwrap().as_u64().unwrap();
+        let id = doc.get_first(field).unwrap().as_u128().unwrap();
 
-        if id == u64::MAX {
+        if id == u128::MAX {
             Ok(None)
         } else {
             Ok(Some(id.into()))
@@ -186,8 +199,7 @@ impl InvertedIndex {
         let tv_searcher = self.reader.searcher();
         let mut webpages: Vec<RetrievedWebpage> = websites
             .iter()
-            .map(|website| self.retrieve_doc(website.address, &tv_searcher))
-            .filter_map(|res| res.ok())
+            .filter_map(|website| self.retrieve_doc(website.address, &tv_searcher).ok())
             .collect();
 
         for (url, page) in webpages.iter_mut().filter_map(|page| {
@@ -264,50 +276,80 @@ impl InvertedIndex {
         Ok(RetrievedWebpage::from(doc))
     }
 
-    pub(crate) fn get_webpage(&self, url: &str) -> Option<RetrievedWebpage> {
-        let url = Url::parse(url).ok()?;
-        let tv_searcher = self.reader.searcher();
+    pub(crate) fn get_site_urls(&self, site: &str, offset: usize, limit: usize) -> Vec<Url> {
+        let ctx = self.local_search_ctx();
+        let tv_searcher = ctx.tv_searcher;
+
         let field = tv_searcher
             .schema()
-            .get_field(Field::Text(TextFieldEnum::from(text_field::UrlNoTokenizer)).name())
+            .get_field(text_field::SiteNoTokenizer.name())
             .unwrap();
 
-        let term = tantivy::Term::from_field_text(field, url.as_str());
+        let term = tantivy::Term::from_field_text(field, site);
 
         let query = tantivy::query::TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic);
 
-        let mut res = tv_searcher
-            .search(&query, &tantivy::collector::TopDocs::with_limit(1))
-            .unwrap();
-
-        res.pop()
-            .map(|(_, doc)| self.retrieve_doc(doc.into(), &tv_searcher).unwrap())
+        match tv_searcher.search(
+            &query,
+            &tantivy::collector::TopDocs::with_limit(limit).and_offset(offset),
+        ) {
+            Ok(res) => res
+                .into_iter()
+                .filter_map(|(_, doc)| {
+                    self.retrieve_doc(
+                        DocAddress::from_tantivy(
+                            doc,
+                            self.shard_id.expect("Shard ID should be set for searches"),
+                        ),
+                        &tv_searcher,
+                    )
+                    .ok()
+                })
+                .filter_map(|page| Url::parse(&page.url).ok())
+                .collect(),
+            Err(_) => vec![],
+        }
     }
 
-    pub(crate) fn get_homepage(&self, url: &Url) -> Option<RetrievedWebpage> {
-        let tv_searcher = self.reader.searcher();
-        let field = tv_searcher
-            .schema()
-            .get_field(
-                Field::Text(TextFieldEnum::from(text_field::SiteIfHomepageNoTokenizer)).name(),
-            )
-            .unwrap();
+    pub fn search_initial_generic<Q: GenericQuery>(
+        &self,
+        query: &Q,
+    ) -> Result<<Q::Collector as generic_query::Collector>::Fruit> {
+        let ctx = self.local_search_ctx();
 
-        let host = url.normalized_host().unwrap_or_default();
+        let res = ctx.tv_searcher.search(
+            &query.tantivy_query(&ctx),
+            &generic_query::collector::TantivyCollector::from(&query.collector(&ctx)),
+        )?;
 
-        let term = tantivy::Term::from_field_text(field, host);
-
-        let query = tantivy::query::TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic);
-
-        let mut res = tv_searcher
-            .search(&query, &tantivy::collector::TopDocs::with_limit(1))
-            .unwrap();
-
-        res.pop()
-            .map(|(_, doc)| self.retrieve_doc(doc.into(), &tv_searcher).unwrap())
+        Ok(res)
     }
 
-    pub(crate) fn top_key_phrases(&self, top_n: usize) -> Vec<KeyPhrase> {
-        KeyPhrase::compute_top(&self.reader, top_n)
+    pub fn retrieve_generic<Q: GenericQuery>(
+        &self,
+        query: &Q,
+        fruit: <Q::Collector as generic_query::Collector>::Fruit,
+    ) -> Result<Q::IntermediateOutput> {
+        let ctx = self.local_search_ctx();
+        query.retrieve(&ctx, fruit)
+    }
+
+    pub fn search_generic<Q>(&self, query: &Q) -> Result<Q::Output>
+    where
+        Q: GenericQuery,
+        <<Q::Collector as generic_query::Collector>::Child as tantivy::collector::SegmentCollector>::Fruit:
+            From<<Q::Collector as generic_query::Collector>::Fruit>,
+    {
+        let fruit = self.search_initial_generic(query)?;
+        let mut fruit = query
+            .coordinator_collector()
+            .merge_fruits(vec![fruit.into()])?;
+
+        if let Some(shard_id) = self.shard_id {
+            fruit = query.filter_fruit_shards(shard_id, fruit);
+        }
+
+        let res = self.retrieve_generic(query, fruit)?;
+        Ok(Q::merge_results(vec![res]))
     }
 }

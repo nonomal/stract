@@ -12,207 +12,287 @@
 // GNU Affero General Public License for more details.
 //
 // You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/
+// along with this program.  If not, see <https://www.gnu.org/licenses/>
 
-use utoipa::ToSchema;
+use strum::VariantArray;
+use tantivy::{
+    schema::{document::DocumentDeserialize, OwnedValue},
+    Document,
+};
 
 use crate::webpage::html::links::RelFlags;
 
-use super::{FullNodeID, Node, NodeDatum, NodeID};
+use super::{
+    schema::{Field, FieldEnum, FieldEnumDiscriminants},
+    Node, NodeID,
+};
 
-pub const MAX_LABEL_LENGTH: usize = 1024;
-
-pub trait EdgeLabel
-where
-    Self: Send + Sync + Sized,
-{
-    fn to_bytes(&self) -> anyhow::Result<Vec<u8>>;
-    fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self>;
+#[derive(Debug, Clone, Copy, bincode::Encode, bincode::Decode)]
+pub struct SmallEdge {
+    pub from: NodeID,
+    pub to: NodeID,
+    pub rel_flags: RelFlags,
 }
 
-impl EdgeLabel for String {
-    fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        Ok(self.as_bytes().to_vec())
-    }
-
-    fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(String::from_utf8(bytes.to_vec())?)
-    }
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+pub struct SmallEdgeWithLabel {
+    pub from: NodeID,
+    pub to: NodeID,
+    pub rel_flags: RelFlags,
+    pub label: String,
 }
 
-impl EdgeLabel for () {
-    fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        Ok(Vec::new())
-    }
-
-    fn from_bytes(_bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(())
-    }
+#[derive(
+    Debug,
+    Clone,
+    bincode::Encode,
+    bincode::Decode,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PrettyRelFlag {
+    Alternate,
+    Author,
+    Canonical,
+    Help,
+    Icon,
+    License,
+    Me,
+    Next,
+    NoFollow,
+    Prev,
+    PrivacyPolicy,
+    Search,
+    Stylesheet,
+    Tag,
+    TermsOfService,
+    Sponsored,
+    IsInFooter,
+    IsInNavigation,
+    LinkTag,
+    ScriptTag,
+    MetaTag,
+    SameIcannDomain,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, bincode::Encode, bincode::Decode)]
-pub struct Edge<L>
-where
-    L: EdgeLabel,
-{
-    pub from: NodeDatum,
-    pub to: NodeDatum,
-    pub rel: RelFlags,
-    pub label: L,
-}
-
-impl<L> Edge<L>
-where
-    L: EdgeLabel,
-{
-    pub fn rel_flags(&self) -> RelFlags {
-        self.rel
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, bincode::Encode, bincode::Decode)]
-pub struct InsertableEdge<L>
-where
-    L: EdgeLabel,
-{
-    pub from: FullNodeID,
-    pub to: FullNodeID,
-    pub rel: RelFlags,
-    pub label: L,
-}
-
-#[cfg(test)]
-impl<L> From<InsertableEdge<L>> for Edge<L>
-where
-    L: EdgeLabel,
-{
-    fn from(edge: InsertableEdge<L>) -> Self {
-        Edge {
-            from: NodeDatum::new(edge.from.id, u64::MAX),
-            to: NodeDatum::new(edge.to.id, u64::MAX),
-            rel: edge.rel,
-            label: edge.label,
+impl From<RelFlags> for Option<PrettyRelFlag> {
+    fn from(flags: RelFlags) -> Self {
+        if flags.contains(RelFlags::ALTERNATE) {
+            Some(PrettyRelFlag::Alternate)
+        } else if flags.contains(RelFlags::AUTHOR) {
+            Some(PrettyRelFlag::Author)
+        } else if flags.contains(RelFlags::CANONICAL) {
+            Some(PrettyRelFlag::Canonical)
+        } else if flags.contains(RelFlags::HELP) {
+            Some(PrettyRelFlag::Help)
+        } else if flags.contains(RelFlags::ICON) {
+            Some(PrettyRelFlag::Icon)
+        } else if flags.contains(RelFlags::LICENSE) {
+            Some(PrettyRelFlag::License)
+        } else if flags.contains(RelFlags::ME) {
+            Some(PrettyRelFlag::Me)
+        } else if flags.contains(RelFlags::NEXT) {
+            Some(PrettyRelFlag::Next)
+        } else if flags.contains(RelFlags::NOFOLLOW) {
+            Some(PrettyRelFlag::NoFollow)
+        } else if flags.contains(RelFlags::PREV) {
+            Some(PrettyRelFlag::Prev)
+        } else if flags.contains(RelFlags::PRIVACY_POLICY) {
+            Some(PrettyRelFlag::PrivacyPolicy)
+        } else if flags.contains(RelFlags::SEARCH) {
+            Some(PrettyRelFlag::Search)
+        } else if flags.contains(RelFlags::STYLESHEET) {
+            Some(PrettyRelFlag::Stylesheet)
+        } else if flags.contains(RelFlags::TAG) {
+            Some(PrettyRelFlag::Tag)
+        } else if flags.contains(RelFlags::TERMS_OF_SERVICE) {
+            Some(PrettyRelFlag::TermsOfService)
+        } else if flags.contains(RelFlags::SPONSORED) {
+            Some(PrettyRelFlag::Sponsored)
+        } else if flags.contains(RelFlags::IS_IN_FOOTER) {
+            Some(PrettyRelFlag::IsInFooter)
+        } else if flags.contains(RelFlags::IS_IN_NAVIGATION) {
+            Some(PrettyRelFlag::IsInNavigation)
+        } else if flags.contains(RelFlags::LINK_TAG) {
+            Some(PrettyRelFlag::LinkTag)
+        } else if flags.contains(RelFlags::SCRIPT_TAG) {
+            Some(PrettyRelFlag::ScriptTag)
+        } else if flags.contains(RelFlags::META_TAG) {
+            Some(PrettyRelFlag::MetaTag)
+        } else if flags.contains(RelFlags::SAME_ICANN_DOMAIN) {
+            Some(PrettyRelFlag::SameIcannDomain)
+        } else {
+            None
         }
+    }
+}
+
+impl From<RelFlags> for Vec<PrettyRelFlag> {
+    fn from(flags: RelFlags) -> Self {
+        flags
+            .iter_names()
+            .flat_map(|(_, flag)| <Option<PrettyRelFlag>>::from(flag))
+            .collect()
     }
 }
 
 #[derive(
     Debug,
     Clone,
-    serde::Serialize,
-    serde::Deserialize,
     bincode::Encode,
     bincode::Decode,
-    PartialEq,
-    Eq,
-    Hash,
-    ToSchema,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
 )]
-#[serde(rename_all = "camelCase")]
-pub struct FullEdge {
-    pub from: Node,
-    pub to: Node,
+pub struct PrettyEdge {
+    pub from: String,
+    pub to: String,
+    pub rel_flags: Vec<PrettyRelFlag>,
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SegmentEdge<L>
-where
-    L: EdgeLabel,
-{
-    pub from: NodeDatum,
-    pub to: NodeDatum,
-    pub rel: RelFlags,
-    pub label: L,
-}
-
-impl<L> From<SegmentEdge<L>> for Edge<L>
-where
-    L: EdgeLabel,
-{
-    fn from(edge: SegmentEdge<L>) -> Self {
-        Edge {
-            from: edge.from,
-            to: edge.to,
-            rel: edge.rel,
+impl From<Edge> for PrettyEdge {
+    fn from(edge: Edge) -> Self {
+        Self {
+            from: edge.from.as_str().to_string(),
+            to: edge.to.as_str().to_string(),
+            rel_flags: edge.rel_flags.into(),
             label: edge.label,
         }
     }
 }
 
-#[cfg(test)]
-impl<L> From<Edge<L>> for SegmentEdge<L>
-where
-    L: EdgeLabel,
-{
-    fn from(edge: Edge<L>) -> Self {
-        SegmentEdge {
-            from: edge.from,
-            to: edge.to,
-            rel: edge.rel,
-            label: edge.label,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
+pub struct Edge {
+    pub from: Node,
+    pub to: Node,
+    pub rel_flags: RelFlags,
+    pub label: String,
+    pub sort_score: u64,
+    pub from_centrality: f64,
+    pub to_centrality: f64,
+    pub from_rank: u64,
+    pub to_rank: u64,
+    pub num_outgoing_hosts_from_page: u64,
+}
+
+impl Edge {
+    pub fn empty() -> Self {
+        Self {
+            from: Node::empty(),
+            to: Node::empty(),
+            rel_flags: RelFlags::default(),
+            label: String::default(),
+            sort_score: 0,
+            from_centrality: 0.0,
+            to_centrality: 0.0,
+            from_rank: 0,
+            to_rank: 0,
+            num_outgoing_hosts_from_page: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_test(from: Node, to: Node) -> Self {
+        Self {
+            from,
+            to,
+            ..Self::empty()
         }
     }
 }
 
-#[cfg(test)]
-impl<L> From<InsertableEdge<L>> for SegmentEdge<L>
-where
-    L: EdgeLabel,
-{
-    fn from(edge: InsertableEdge<L>) -> Self {
-        SegmentEdge {
-            from: NodeDatum::new(edge.from.id, u64::MAX),
-            to: NodeDatum::new(edge.to.id, u64::MAX),
-            rel: edge.rel,
-            label: edge.label,
-        }
+impl Document for Edge {
+    type Value<'a> = ReferenceValue<'a>;
+
+    type FieldsValuesIter<'a> = FieldsIter<'a>;
+
+    fn iter_fields_and_values(&self) -> Self::FieldsValuesIter<'_> {
+        FieldsIter::new(self)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct StoredEdge<L = ()> {
-    pub other: NodeDatum,
-    pub rel: RelFlags,
-    pub label: L,
+impl DocumentDeserialize for Edge {
+    fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Self, tantivy::schema::document::DeserializeError>
+    where
+        D: tantivy::schema::document::DocumentDeserializer<'de>,
+    {
+        let mut deserializer = deserializer;
+        let mut edge = Edge::empty();
+
+        while let Some((field, value)) = deserializer.next_field::<OwnedValue>()? {
+            let field =
+                FieldEnum::from(FieldEnumDiscriminants::VARIANTS[field.field_id() as usize]);
+            field
+                .set_value(&mut edge, value)
+                .map_err(|e| tantivy::schema::document::DeserializeError::custom(e.to_string()))?;
+        }
+
+        Ok(edge)
+    }
 }
 
-impl StoredEdge<()> {
-    pub fn new(other: NodeDatum, rel: RelFlags) -> Self {
-        StoredEdge {
-            other,
-            rel,
-            label: (),
-        }
+pub struct FieldsIter<'a> {
+    edge: &'a Edge,
+    index: usize,
+}
+
+impl<'a> FieldsIter<'a> {
+    pub fn new(edge: &'a Edge) -> Self {
+        Self { edge, index: 0 }
     }
 }
 
-impl<L> StoredEdge<L> {
-    pub fn with_label<L2>(self, label: L2) -> StoredEdge<L2> {
-        StoredEdge {
-            other: self.other,
-            rel: self.rel,
-            label,
+impl<'a> Iterator for FieldsIter<'a> {
+    type Item = (tantivy::schema::Field, ReferenceValue<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        FieldEnumDiscriminants::VARIANTS
+            .get(self.index)
+            .map(|field| {
+                let field = FieldEnum::from(*field);
+                let tv_field = tantivy::schema::Field::from_field_id(self.index as u32);
+
+                let value = field.document_value(self.edge);
+                self.index += 1;
+
+                (tv_field, value)
+            })
+    }
+}
+
+/// A enum representing a value for tantivy to index.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReferenceValue<'a> {
+    Str(&'a str),
+    U64(u64),
+    U128(u128),
+    F64(f64),
+}
+
+impl<'a> tantivy::schema::Value<'a> for ReferenceValue<'a> {
+    type ArrayIter = std::iter::Empty<Self>;
+    type ObjectIter = std::iter::Empty<(&'a str, Self)>;
+
+    fn as_value(&self) -> tantivy::schema::document::ReferenceValue<'a, Self> {
+        match self {
+            ReferenceValue::Str(s) => tantivy::schema::document::ReferenceValue::Leaf(
+                tantivy::schema::document::ReferenceValueLeaf::Str(s),
+            ),
+            ReferenceValue::U64(u) => tantivy::schema::document::ReferenceValue::Leaf(
+                tantivy::schema::document::ReferenceValueLeaf::U64(*u),
+            ),
+            ReferenceValue::U128(u) => tantivy::schema::document::ReferenceValue::Leaf(
+                tantivy::schema::document::ReferenceValueLeaf::U128(*u),
+            ),
+            ReferenceValue::F64(f) => tantivy::schema::document::ReferenceValue::Leaf(
+                tantivy::schema::document::ReferenceValueLeaf::F64(*f),
+            ),
         }
-    }
-
-    #[inline]
-    pub fn label(&self) -> &L {
-        &self.label
-    }
-
-    #[inline]
-    pub fn other(&self) -> NodeID {
-        self.other.node()
-    }
-
-    #[inline]
-    pub fn rel(&self) -> RelFlags {
-        self.rel
-    }
-
-    #[inline]
-    pub fn other_host_rank(&self) -> u64 {
-        self.other.host_rank()
     }
 }

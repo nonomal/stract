@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
 type Method = 'DELETE' | 'GET' | 'PUT' | 'POST' | 'HEAD' | 'TRACE' | 'PATCH';
 
 let GLOBAL_API_BASE = '';
@@ -117,18 +119,23 @@ export const api = {
   search: (body: ApiSearchQuery, options?: ApiOptions) =>
     requestJson<ApiSearchResult>('POST', `/beta/api/search`, body, options),
   searchSidebar: (body: SidebarQuery, options?: ApiOptions) =>
-    requestJson<DisplayedSidebar>('POST', `/beta/api/search/sidebar`, body, options),
+    requestJson<null | DisplayedSidebar>('POST', `/beta/api/search/sidebar`, body, options),
   searchSpellcheck: (body: SpellcheckQuery, options?: ApiOptions) =>
-    requestJson<HighlightedSpellCorrection>('POST', `/beta/api/search/spellcheck`, body, options),
+    requestJson<null | HighlightedSpellCorrection>(
+      'POST',
+      `/beta/api/search/spellcheck`,
+      body,
+      options,
+    ),
   searchWidget: (body: WidgetQuery, options?: ApiOptions) =>
-    requestJson<Widget>('POST', `/beta/api/search/widget`, body, options),
+    requestJson<null | Widget>('POST', `/beta/api/search/widget`, body, options),
   webgraphHostIngoing: (
     query: {
       host: string;
     },
     options?: ApiOptions,
   ) =>
-    requestJson<FullEdge[]>(
+    requestJson<PrettyEdge[]>(
       'POST',
       `/beta/api/webgraph/host/ingoing?${new URLSearchParams(query)}`,
       options,
@@ -150,12 +157,12 @@ export const api = {
     },
     options?: ApiOptions,
   ) =>
-    requestJson<FullEdge[]>(
+    requestJson<PrettyEdge[]>(
       'POST',
       `/beta/api/webgraph/host/outgoing?${new URLSearchParams(query)}`,
       options,
     ),
-  webgraphHostSimilar: (body: SimilarHostsParams, options?: ApiOptions) =>
+  webgraphHostSimilar: (body: SimilarHostsQuery, options?: ApiOptions) =>
     requestJson<ScoredHost[]>('POST', `/beta/api/webgraph/host/similar`, body, options),
   webgraphPageIngoing: (
     query: {
@@ -163,7 +170,7 @@ export const api = {
     },
     options?: ApiOptions,
   ) =>
-    requestJson<FullEdge[]>(
+    requestJson<PrettyEdge[]>(
       'POST',
       `/beta/api/webgraph/page/ingoing?${new URLSearchParams(query)}`,
       options,
@@ -174,7 +181,7 @@ export const api = {
     },
     options?: ApiOptions,
   ) =>
-    requestJson<FullEdge[]>(
+    requestJson<PrettyEdge[]>(
       'POST',
       `/beta/api/webgraph/page/outgoing?${new URLSearchParams(query)}`,
       options,
@@ -184,7 +191,7 @@ export const api = {
 export type ApiSearchQuery = {
   countResultsExact?: boolean;
   flattenResponse?: boolean;
-  hostRankings?: HostRankings;
+  hostRankings?: null | HostRankings;
   numResults?: number;
   optic?: string;
   page?: number;
@@ -192,7 +199,7 @@ export type ApiSearchQuery = {
   returnRankingSignals?: boolean;
   returnStructuredData?: boolean;
   safeSearch?: boolean;
-  selectedRegion?: Region;
+  selectedRegion?: null | Region;
   signalCoefficients?: {};
 };
 export type ApiSearchResult =
@@ -247,7 +254,12 @@ export type DisplayedAnswer = {
 };
 export type DisplayedEntity = {
   imageId?: string;
-  info: string & EntitySnippet[][];
+  info: [
+    string,
+    {
+      fragments: EntitySnippetFragment[];
+    },
+  ][];
   matchScore: number;
   relatedEntities: DisplayedEntity[];
   smallAbstract: EntitySnippet;
@@ -271,7 +283,7 @@ export type DisplayedWebpage = {
   likelyHasPaywall: boolean;
   prettyUrl: string;
   rankingSignals?: {};
-  richSnippet?: RichSnippet;
+  richSnippet?: null | RichSnippet;
   site: string;
   snippet: Snippet;
   structuredData?: StructuredData[];
@@ -295,11 +307,6 @@ export type Example = string;
 export type ExploreExportOpticParams = {
   chosenHosts: string[];
   similarHosts: string[];
-};
-export type FullEdge = {
-  from: Node;
-  label: string;
-  to: Node;
 };
 export type HighlightedFragment = {
   kind: HighlightedKind;
@@ -345,6 +352,59 @@ export type PartOfSpeechMeaning = {
   meanings: WordMeaning[];
   pos: PartOfSpeech;
 };
+export type PrettyEdge = {
+  from: string;
+  label: string;
+  rel_flags: PrettyRelFlag[];
+  to: string;
+};
+export type PrettyRelFlag =
+  | 'alternate'
+  | 'author'
+  | 'canonical'
+  | 'help'
+  | 'icon'
+  | 'license'
+  | 'me'
+  | 'next'
+  | 'no_follow'
+  | 'prev'
+  | 'privacy_policy'
+  | 'search'
+  | 'stylesheet'
+  | 'tag'
+  | 'terms_of_service'
+  | 'sponsored'
+  | 'is_in_footer'
+  | 'is_in_navigation'
+  | 'link_tag'
+  | 'script_tag'
+  | 'meta_tag'
+  | 'same_icann_domain';
+export const PRETTY_REL_FLAGS = [
+  'alternate',
+  'author',
+  'canonical',
+  'help',
+  'icon',
+  'license',
+  'me',
+  'next',
+  'no_follow',
+  'prev',
+  'privacy_policy',
+  'search',
+  'stylesheet',
+  'tag',
+  'terms_of_service',
+  'sponsored',
+  'is_in_footer',
+  'is_in_navigation',
+  'link_tag',
+  'script_tag',
+  'meta_tag',
+  'same_icann_domain',
+] satisfies PrettyRelFlag[];
 export type Property = string | StructuredData;
 export type Region = 'All' | 'Denmark' | 'France' | 'Germany' | 'Spain' | 'US';
 export const REGIONS = ['All', 'Denmark', 'France', 'Germany', 'Spain', 'US'] satisfies Region[];
@@ -468,7 +528,8 @@ export type SignalScore = {
   coefficient: number;
   value: number;
 };
-export type SimilarHostsParams = {
+export type SimilarHostsQuery = {
+  filters?: string[];
   hosts: string[];
   topN: number;
 };
@@ -490,7 +551,7 @@ export type StackOverflowQuestion = {
   body: CodeOrText[];
 };
 export type StructuredData = {
-  _type?: OneOrManyString;
+  _type?: null | OneOrManyString;
 };
 export type Suggestion = {
   highlighted: HighlightedFragment[];

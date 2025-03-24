@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -16,82 +16,77 @@
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use optics::HostRankings;
+    use tokio::sync::RwLock;
 
     use crate::{
         bangs::Bangs,
-        gen_temp_path,
         index::Index,
-        searcher::{
-            api::ApiSearcher, live::LiveSearcher, LocalSearchClient, LocalSearcher, SearchQuery,
-        },
-        webgraph::{Node, WebgraphWriter},
-        webpage::{html::links::RelFlags, Html, Webpage},
+        searcher::{api::ApiSearcher, LocalSearchClient, LocalSearcher, SearchQuery},
+        webgraph::{Edge, Node, Webgraph},
+        webpage::{Html, Webpage},
     };
     const CONTENT: &str = "this is the best example website ever this is the best example website ever this is the best example website ever this is the best example website ever this is the best example website ever this is the best example website ever";
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn host_rankings() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let dir = crate::gen_temp_dir().unwrap();
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
-        let mut wrt = WebgraphWriter::new(
-            gen_temp_path(),
-            crate::executor::Executor::single_thread(),
-            crate::webgraph::Compression::default(),
-            None,
-        );
+        let mut graph = Webgraph::open(&dir, 0u64.into()).unwrap();
 
-        wrt.insert(
-            Node::from("https://www.first.com").into_host(),
-            Node::from("https://www.nan.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        wrt.insert(
-            Node::from("https://www.nan.com").into_host(),
-            Node::from("https://www.first.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        wrt.insert(
-            Node::from("https://www.third.com").into_host(),
-            Node::from("https://www.third.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        wrt.insert(
-            Node::from("https://www.nan.com").into_host(),
-            Node::from("https://www.second.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        wrt.insert(
-            Node::from("https://www.second.com").into_host(),
-            Node::from("https://www.nan.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        wrt.insert(
-            Node::from("https://www.second.com").into_host(),
-            Node::from("https://www.third.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        wrt.insert(
-            Node::from("https://www.extra.com").into_host(),
-            Node::from("https://www.first.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-        wrt.insert(
-            Node::from("https://www.second.com").into_host(),
-            Node::from("https://www.extra.com").into_host(),
-            String::new(),
-            RelFlags::default(),
-        );
-
-        let graph = wrt.finalize();
+        graph
+            .insert(Edge::new_test(
+                Node::from("https://www.first.com").into_host(),
+                Node::from("https://www.nan.com").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("https://www.nan.com").into_host(),
+                Node::from("https://www.first.com").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("https://www.third.com").into_host(),
+                Node::from("https://www.third.com").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("https://www.nan.com").into_host(),
+                Node::from("https://www.second.com").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("https://www.second.com").into_host(),
+                Node::from("https://www.nan.com").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("https://www.second.com").into_host(),
+                Node::from("https://www.third.com").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("https://www.extra.com").into_host(),
+                Node::from("https://www.first.com").into_host(),
+            ))
+            .unwrap();
+        graph
+            .insert(Edge::new_test(
+                Node::from("https://www.second.com").into_host(),
+                Node::from("https://www.extra.com").into_host(),
+            ))
+            .unwrap();
+        graph.commit().unwrap();
 
         index
             .insert(&Webpage {
@@ -168,11 +163,13 @@ mod tests {
             })
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher: ApiSearcher<_, LiveSearcher, _> = ApiSearcher::new(
-            LocalSearchClient::from(LocalSearcher::new(index)),
+        let searcher: ApiSearcher<_, _> = ApiSearcher::new(
+            LocalSearchClient::from(LocalSearcher::builder(Arc::new(RwLock::new(index))).build()),
+            None,
             Bangs::empty(),
             crate::searcher::api::Config::default(),
         )
+        .await
         .with_webgraph(graph);
 
         let result = searcher

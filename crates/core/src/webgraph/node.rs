@@ -34,31 +34,29 @@ use crate::{intmap, webpage::url_ext::UrlExt};
     Ord,
     Hash,
 )]
-pub struct NodeID(u64);
+pub struct NodeID(u128);
 
 impl NodeID {
+    #[cfg(test)]
     pub fn as_u64(self) -> u64 {
+        self.0 as u64
+    }
+
+    pub fn as_u128(self) -> u128 {
         self.0
-    }
-
-    pub fn from_be_bytes(bytes: [u8; 8]) -> Self {
-        NodeID(u64::from_be_bytes(bytes))
-    }
-
-    pub fn to_be_bytes(self) -> [u8; 8] {
-        self.0.to_be_bytes()
     }
 }
 
 impl From<u128> for NodeID {
     fn from(val: u128) -> Self {
-        NodeID(val as u64)
+        NodeID(val)
     }
 }
 
+#[cfg(test)]
 impl From<u64> for NodeID {
     fn from(val: u64) -> Self {
-        NodeID(val)
+        NodeID(val as u128)
     }
 }
 
@@ -95,7 +93,7 @@ impl intmap::Key for NodeID {
     }
 
     fn modulus_usize(self, rhs: usize) -> usize {
-        (self.0 % (rhs as u64)) as usize
+        (self.0 % (rhs as u128)) as usize
     }
 }
 
@@ -122,6 +120,19 @@ impl Node {
     #[cfg(test)]
     pub fn new_for_test(name: &str) -> Self {
         Node {
+            name: name.to_string(),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Node {
+            name: String::new(),
+        }
+    }
+
+    /// Dangerous! No validation is done on the input string.
+    pub fn from_str_not_validated(name: &str) -> Self {
+        Self {
             name: name.to_string(),
         }
     }
@@ -153,14 +164,10 @@ impl Node {
     }
 }
 
+#[cfg(test)]
 impl From<String> for Node {
     fn from(name: String) -> Self {
-        let url = if name.contains("://") {
-            Url::parse(&name).unwrap()
-        } else {
-            Url::parse(&("http://".to_string() + name.as_str())).unwrap()
-        };
-
+        let url = Url::robust_parse(&name).unwrap();
         Node::from(&url)
     }
 }
@@ -172,6 +179,7 @@ impl From<&Url> for Node {
     }
 }
 
+#[cfg(test)]
 impl From<&str> for Node {
     fn from(name: &str) -> Self {
         name.to_string().into()
@@ -189,6 +197,12 @@ pub fn normalize_url(url: &Url) -> String {
     url.normalize_in_place();
 
     let scheme = url.scheme();
+
+    if scheme != "http" && scheme != "https" {
+        url.set_query(None);
+        return url.to_string();
+    }
+
     let mut normalized = url
         .as_str()
         .strip_prefix(scheme)
@@ -208,61 +222,27 @@ pub fn normalize_url(url: &Url) -> String {
     normalized
 }
 
-#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
-pub struct NodeDatum {
-    id: NodeID,
-    host_rank: u64,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl PartialOrd for NodeDatum {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for NodeDatum {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.host_rank
-            .cmp(&other.host_rank)
-            .then_with(|| self.id.cmp(&other.id))
-    }
-}
-
-impl PartialEq for NodeDatum {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.host_rank == other.host_rank
-    }
-}
-
-impl Eq for NodeDatum {}
-
-impl std::hash::Hash for NodeDatum {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-        self.host_rank.hash(state);
-    }
-}
-
-impl NodeDatum {
-    pub fn new<N>(node: N, host_rank: u64) -> Self
-    where
-        N: Into<NodeID>,
-    {
-        Self {
-            id: node.into(),
-            host_rank,
-        }
-    }
-}
-
-impl NodeDatum {
-    #[inline]
-    pub fn node(&self) -> NodeID {
-        self.id
+    #[test]
+    fn test_normalize_url() {
+        assert_eq!(
+            normalize_url(&Url::robust_parse("https://www.example.com/").unwrap()),
+            "example.com"
+        );
     }
 
-    #[inline]
-    pub fn host_rank(&self) -> u64 {
-        self.host_rank
+    #[test]
+    fn test_host_node() {
+        assert_eq!(
+            Node::from("example.com").into_host(),
+            Node::from("example.com")
+        );
+        assert_eq!(
+            Node::from("https://example.com/123").into_host(),
+            Node::from("example.com")
+        );
     }
 }

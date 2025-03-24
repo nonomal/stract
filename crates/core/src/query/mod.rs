@@ -35,7 +35,6 @@ pub mod optic;
 pub mod parser;
 mod pattern_query;
 mod plan;
-pub mod shortcircuit;
 pub mod union;
 
 use self::{optic::AsMultipleTantivyQuery, parser::SimpleOrPhrase};
@@ -206,18 +205,21 @@ impl tantivy::query::Query for Query {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::{index::Index, rand_words, searcher::LocalSearcher, webpage::Webpage};
     use proptest::prelude::*;
+    use tokio::sync::RwLock;
 
     use super::*;
 
-    fn empty_index() -> InvertedIndex {
+    fn empty_index() -> (InvertedIndex, file_store::temp::TempDir) {
         InvertedIndex::temporary().unwrap()
     }
 
     #[test]
     fn simple_parse() {
-        let index = empty_index();
+        let (index, _dir) = empty_index();
         let ctx = index.local_search_ctx();
 
         let query = Query::parse(
@@ -244,7 +246,7 @@ mod tests {
 
     #[test]
     fn parse_trailing_leading_whitespace() {
-        let index = empty_index();
+        let (index, _dir) = empty_index();
         let ctx = index.local_search_ctx();
 
         let query = Query::parse(
@@ -271,7 +273,7 @@ mod tests {
 
     #[test]
     fn parse_weird_characters() {
-        let index = empty_index();
+        let (index, _dir) = empty_index();
         let ctx = index.local_search_ctx();
 
         let terms = Query::parse(
@@ -319,7 +321,7 @@ mod tests {
 
     #[test]
     fn simple_terms_phrase() {
-        let index = empty_index();
+        let (index, _dir) = empty_index();
         let ctx = index.local_search_ctx();
 
         let terms = Query::parse(
@@ -339,7 +341,7 @@ mod tests {
 
     #[test]
     fn not_query() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
         let query = SearchQuery {
             query: "test -website".to_string(),
             ..Default::default()
@@ -382,16 +384,16 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.second.com/");
     }
 
     #[test]
     fn site_query() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -448,13 +450,13 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "test site:first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
 
@@ -462,7 +464,7 @@ mod tests {
             query: "test site:www.first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
 
@@ -470,7 +472,7 @@ mod tests {
             query: "test -site:first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 2);
 
         assert!(result
@@ -481,7 +483,7 @@ mod tests {
 
     #[test]
     fn links_to_query() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -522,13 +524,13 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "test linksto:first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.second.com/example/abc");
 
@@ -536,7 +538,7 @@ mod tests {
             query: "test linkto:www.first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.second.com/example/abc");
 
@@ -544,7 +546,7 @@ mod tests {
             query: "test -linkto:first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
 
@@ -552,7 +554,7 @@ mod tests {
             query: "test linkto:second.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
 
@@ -560,7 +562,7 @@ mod tests {
             query: "test linkto:www.second.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
 
@@ -568,7 +570,7 @@ mod tests {
             query: "test linkto:second.com/example".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
 
@@ -576,14 +578,14 @@ mod tests {
             query: "test linksto:second.com/example/abc".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
     }
 
     #[test]
     fn links_to_uppercase() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -624,20 +626,20 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "test linkto:second.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
     }
 
     #[test]
     fn title_query() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -676,20 +678,20 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "intitle:website".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
     }
 
     #[test]
     fn url_query() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -728,20 +730,20 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "test inurl:forum".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/forum");
     }
 
     #[test]
     fn empty_query() {
-        let index = empty_index();
+        let (index, _dir) = empty_index();
         let ctx = index.local_search_ctx();
 
         let query = Query::parse(
@@ -762,7 +764,7 @@ mod tests {
 
     #[test]
     fn query_term_only_special_char() {
-        let index = empty_index();
+        let (index, _dir) = empty_index();
         let ctx = index.local_search_ctx();
 
         let _query = Query::parse(
@@ -778,7 +780,7 @@ mod tests {
 
     #[test]
     fn site_query_split_domain() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -823,20 +825,20 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "test site:first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 0);
 
         let query = SearchQuery {
             query: "test site:the-first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.the-first.com/");
 
@@ -844,14 +846,14 @@ mod tests {
             query: "test site:www.the-first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.the-first.com/");
     }
 
     #[test]
     fn phrase_query() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -896,13 +898,13 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "\"Test website\"".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
         assert_eq!(result.webpages[0].url, "https://www.first.com/");
 
@@ -910,13 +912,13 @@ mod tests {
             query: "\"Test website\" site:www.second.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 0);
     }
 
     #[test]
     fn match_compound_words() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -963,14 +965,14 @@ mod tests {
             .expect("failed to insert webpage");
 
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "testwebsite".to_string(),
             ..Default::default()
         };
 
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 2);
 
         let query = SearchQuery {
@@ -978,7 +980,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 2);
     }
 
@@ -997,7 +999,7 @@ mod tests {
 
     #[test]
     fn safe_search() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
         let mut webpage = Webpage::test_parse(
             &format!(
                 r#"
@@ -1045,7 +1047,7 @@ mod tests {
         index.insert(&webpage).expect("failed to insert webpage");
 
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "test".to_string(),
@@ -1053,7 +1055,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 2);
 
         let query = SearchQuery {
@@ -1062,7 +1064,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
 
         assert_eq!(result.webpages[0].url, "https://www.sfw.com/");
@@ -1070,7 +1072,7 @@ mod tests {
 
     #[test]
     fn suffix_domain_prefix_path_site_operator() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -1136,34 +1138,34 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "test site:.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 2);
 
         let query = SearchQuery {
             query: "test site:.com/example".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
 
         let query = SearchQuery {
             query: "test site:first.com/example".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
 
         let query = SearchQuery {
             query: "test site:first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
 
         let query = SearchQuery {
@@ -1171,13 +1173,13 @@ mod tests {
             ..Default::default()
         };
 
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
     }
 
     #[test]
     fn exact_url_operator() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -1243,26 +1245,26 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "test exacturl:https://www.first.com/example".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 1);
 
         let query = SearchQuery {
             query: "test exacturl:https://www.first.com".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 0);
     }
 
     #[test]
     fn mix_phrase_term_query() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -1328,13 +1330,13 @@ mod tests {
             )
             .expect("failed to insert webpage");
         index.commit().expect("failed to commit index");
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
 
         let query = SearchQuery {
             query: "\"test test\" website".to_string(),
             ..Default::default()
         };
-        let result = searcher.search(&query).expect("Search failed");
+        let result = searcher.search_sync(&query).expect("Search failed");
         assert_eq!(result.webpages.len(), 2);
     }
 

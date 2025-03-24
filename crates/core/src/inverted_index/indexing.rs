@@ -15,9 +15,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>
 
 use tantivy::index::SegmentId;
+use tantivy::indexer::{MergeOperation, SegmentEntry};
 use tantivy::merge_policy::NoMergePolicy;
-
-use tantivy::{IndexWriter, SegmentMeta};
 
 use crate::numericalfield_reader::NumericalFieldReader;
 
@@ -28,63 +27,6 @@ use std::fs;
 use std::path::Path;
 
 use super::InvertedIndex;
-
-struct SegmentMergeCandidate {
-    num_docs: u32,
-    segments: Vec<SegmentMeta>,
-}
-
-pub fn merge_tantivy_segments<P: AsRef<Path>>(
-    writer: &mut IndexWriter,
-    mut segments: Vec<SegmentMeta>,
-    base_path: P,
-    max_num_segments: u64,
-) -> Result<()> {
-    assert!(max_num_segments > 0);
-
-    if segments.len() <= max_num_segments as usize {
-        return Ok(());
-    }
-
-    let num_segments = (max_num_segments + 1) / 2; // ceil(num_segments/2)
-
-    let mut merge_segments = Vec::new();
-
-    for _ in 0..num_segments {
-        merge_segments.push(SegmentMergeCandidate {
-            num_docs: 0,
-            segments: Vec::new(),
-        });
-    }
-
-    segments.sort_by_key(|b| std::cmp::Reverse(b.num_docs()));
-
-    for segment in segments {
-        let best_candidate = merge_segments
-            .iter_mut()
-            .min_by(|a, b| a.num_docs.cmp(&b.num_docs))
-            .unwrap();
-
-        best_candidate.num_docs += segment.num_docs();
-        best_candidate.segments.push(segment);
-    }
-
-    for merge in merge_segments
-        .into_iter()
-        .filter(|merge| !merge.segments.is_empty())
-    {
-        let segment_ids: Vec<_> = merge.segments.iter().map(|segment| segment.id()).collect();
-        writer.merge(&segment_ids[..]).wait()?;
-
-        for segment in merge.segments {
-            for file in segment.list_files() {
-                std::fs::remove_file(base_path.as_ref().join(file)).ok();
-            }
-        }
-    }
-
-    Ok(())
-}
 
 impl InvertedIndex {
     pub fn prepare_writer(&mut self) -> Result<()> {
@@ -143,8 +85,10 @@ impl InvertedIndex {
             .into_iter()
             .collect();
 
-        merge_tantivy_segments(
-            self.writer.as_mut().expect("writer has not been prepared"),
+        tantivy::merge_segments(
+            self.writer
+                .as_mut()
+                .expect("writer should have been prepared"),
             segments,
             base_path,
             max_num_segments,
@@ -153,25 +97,42 @@ impl InvertedIndex {
         Ok(())
     }
 
-    #[allow(clippy::missing_panics_doc)] // cannot panic as writer is prepared
-    pub fn merge_segments_by_id(&mut self, segments: &[SegmentId]) -> Result<()> {
-        self.prepare_writer()?;
-
+    pub async fn start_merge_segments_by_id(
+        &self,
+        segments: &[SegmentId],
+    ) -> Result<(Option<SegmentEntry>, MergeOperation)> {
         if segments.is_empty() {
-            return Ok(());
+            anyhow::bail!("no segments to merge");
         }
 
-        self.writer
+        let (entry, op) = self
+            .writer
+            .as_ref()
+            .expect("writer has not been prepared")
+            .start_merge(segments)
+            .await?;
+
+        Ok((entry, op))
+    }
+
+    pub fn end_merge_segments_by_id(
+        &mut self,
+        merge_operation: MergeOperation,
+        segment_entry: Option<SegmentEntry>,
+    ) -> Result<Option<SegmentId>> {
+        self.prepare_writer()?;
+        let res = self
+            .writer
             .as_mut()
             .expect("writer has not been prepared")
-            .merge(segments)
-            .wait()?;
+            .end_merge(merge_operation, segment_entry)?;
 
-        Ok(())
+        Ok(res.map(|seg| seg.id()))
     }
 
     #[must_use]
     pub fn merge(mut self, mut other: InvertedIndex) -> Self {
+        let shard_id = self.shard_id();
         self.prepare_writer().expect("failed to prepare writer");
         other.prepare_writer().expect("failed to prepare writer");
 
@@ -242,6 +203,9 @@ impl InvertedIndex {
         let mut res = Self::open(path).expect("failed to open index");
 
         res.prepare_writer().expect("failed to prepare writer");
+        if let Some(shard_id) = shard_id {
+            res.set_shard_id(shard_id);
+        }
 
         res
     }
@@ -312,7 +276,7 @@ mod test {
 
     #[test]
     fn test_delete_segments() {
-        let mut index = InvertedIndex::temporary().expect("Unable to open index");
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -386,5 +350,63 @@ mod test {
         let result =
             search(&index, &query, &ctx, ranker.collector(ctx.clone())).expect("Search failed");
         assert_eq!(result.documents.len(), 0);
+    }
+
+    #[test]
+    fn test_merge_into_max_segments() {
+        let (mut index, _dir) = InvertedIndex::temporary().expect("Unable to open index");
+
+        index
+            .insert(
+                &Webpage::test_parse(
+                    &format!(
+                        r#"
+                        <html>
+                            <head>
+                                <title>Test website</title>
+                            </head>
+                            <body>
+                                TEST
+                            </body>
+                        </html>
+                    "#
+                    ),
+                    "https://www.example.com",
+                )
+                .unwrap(),
+            )
+            .expect("failed to insert webpage");
+        index.commit().expect("failed to commit index");
+
+        index
+            .insert(
+                &Webpage::test_parse(
+                    &format!(
+                        r#"
+                        <html>
+                            <head>
+                                <title>Test website</title>
+                            </head>
+                            <body>
+                                TEST
+                            </body>
+                        </html>
+                    "#
+                    ),
+                    "https://www.example.com",
+                )
+                .unwrap(),
+            )
+            .expect("failed to insert webpage");
+        index.commit().expect("failed to commit index");
+
+        let segments = index.segment_ids();
+
+        assert_eq!(segments.len(), 2);
+
+        index.merge_into_max_segments(1).unwrap();
+
+        let segments = index.segment_ids();
+        assert_eq!(segments.len(), 1);
     }
 }

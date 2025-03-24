@@ -14,6 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::time::Duration;
+
 pub struct Collector;
 
 impl Collector {
@@ -114,7 +116,7 @@ impl Crawler {
     }
 
     pub fn min_crawl_delay_ms() -> u64 {
-        5_000
+        10_000
     }
 
     pub fn max_crawl_delay_ms() -> u64 {
@@ -154,22 +156,6 @@ impl SearchQuery {
     }
 }
 
-pub struct Correction;
-
-impl Correction {
-    pub fn misspelled_prob() -> f64 {
-        0.1
-    }
-
-    pub fn correction_threshold() -> f64 {
-        50.0 // logprob difference
-    }
-
-    pub fn lm_prob_weight() -> f64 {
-        5.77
-    }
-}
-
 pub struct Widgets;
 
 impl Widgets {
@@ -199,15 +185,49 @@ impl ApproxHarmonic {
     pub fn max_distance() -> u8 {
         7
     }
-
-    pub fn save_centralities_with_zero() -> bool {
-        false
-    }
 }
 
 pub struct Webgraph;
 impl Webgraph {
     pub fn merge_all_segments() -> bool {
         true
+    }
+}
+
+pub struct LiveCrawler;
+impl LiveCrawler {
+    pub fn feeds_crawl_interval() -> Duration {
+        Duration::from_secs(30 * 60) // 30 minutes
+    }
+
+    pub fn sitemap_crawl_interval() -> Duration {
+        Duration::from_secs(24 * 60 * 60) // daily
+    }
+
+    pub fn frontpage_crawl_interval() -> Duration {
+        Duration::from_secs(12 * 60 * 60) // 12 hours
+    }
+
+    pub fn blogs_budget() -> u64 {
+        300_000
+    }
+
+    pub fn news_budget() -> u64 {
+        500_000
+    }
+
+    pub fn remaining_budget() -> u64 {
+        50_000
+    }
+
+    pub fn init_crawl_db() -> bool {
+        true
+    }
+}
+
+pub struct HarmonicNearestSeed;
+impl HarmonicNearestSeed {
+    pub fn discount_factor() -> f64 {
+        0.5
     }
 }

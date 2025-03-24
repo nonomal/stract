@@ -151,6 +151,7 @@ impl Header {
 #[strum_discriminants(name(RowValueType))]
 pub enum RowValue {
     U64(u64),
+    U128(u128),
     I64(i64),
     F64(f64),
     Bool(bool),
@@ -160,6 +161,7 @@ impl RowValueType {
     const fn size(&self) -> usize {
         match self {
             RowValueType::U64 => 8,
+            RowValueType::U128 => 16,
             RowValueType::F64 => 8,
             RowValueType::I64 => 8,
             RowValueType::Bool => 1,
@@ -172,6 +174,7 @@ impl RowValueType {
             RowValueType::F64 => 1,
             RowValueType::I64 => 2,
             RowValueType::Bool => 3,
+            RowValueType::U128 => 4,
         }
     }
 
@@ -181,6 +184,7 @@ impl RowValueType {
             1 => RowValueType::F64,
             2 => RowValueType::I64,
             3 => RowValueType::Bool,
+            4 => RowValueType::U128,
             _ => panic!("Invalid id"),
         }
     }
@@ -200,6 +204,9 @@ impl RowValue {
             }
             RowValue::Bool(v) => {
                 buf[0] = *v as u8;
+            }
+            RowValue::U128(v) => {
+                buf.copy_from_slice(&v.to_le_bytes());
             }
         }
     }
@@ -223,6 +230,12 @@ impl RowValue {
             }
 
             RowValueType::Bool => RowValue::Bool(buf[0] != 0),
+
+            RowValueType::U128 => {
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&buf[..typ.size()]);
+                RowValue::U128(u128::from_le_bytes(bytes))
+            }
         }
     }
 
@@ -253,14 +266,21 @@ impl RowValue {
             _ => None,
         }
     }
+
+    pub fn as_u128(&self) -> Option<u128> {
+        match self {
+            RowValue::U128(v) => Some(*v),
+            _ => None,
+        }
+    }
 }
 
-pub struct Row<'a> {
-    index: &'a [Option<usize>],
+pub struct Row {
+    index: Vec<Option<usize>>,
     values: Vec<RowValue>,
 }
 
-impl<'a> fmt::Debug for Row<'a> {
+impl fmt::Debug for Row {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Row").field("values", &self.values).finish()
     }
@@ -288,7 +308,7 @@ impl AsFieldId for u32 {
     }
 }
 
-impl<'a> Row<'a> {
+impl Row {
     pub fn get<F: AsFieldId>(&self, field: &F) -> Option<&RowValue> {
         self.get_by_field_id(field.field_id())
     }
@@ -303,6 +323,10 @@ impl<'a> Row<'a> {
 
     pub fn get_u64<F: AsFieldId>(&self, field: &F) -> Option<u64> {
         self.get(field).and_then(|v| v.as_u64())
+    }
+
+    pub fn get_u128<F: AsFieldId>(&self, field: &F) -> Option<u128> {
+        self.get(field).and_then(|v| v.as_u128())
     }
 
     pub fn get_i64<F: AsFieldId>(&self, field: &F) -> Option<i64> {
@@ -427,7 +451,7 @@ impl RowIndex {
         })
     }
 
-    pub fn get_row(&self, idx: usize) -> Option<Row<'_>> {
+    pub fn get_row(&self, idx: usize) -> Option<Row> {
         if self.header.field_order().is_empty() {
             return None;
         }
@@ -456,12 +480,12 @@ impl RowIndex {
         }
 
         Some(Row {
-            index: &self.index,
+            index: self.index.clone(),
             values,
         })
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Row<'_>> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = Row> + '_ {
         (0..self.num_rows()).filter_map(move |idx| self.get_row(idx))
     }
 

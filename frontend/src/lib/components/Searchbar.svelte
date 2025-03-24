@@ -10,8 +10,8 @@
   import { P, match } from 'ts-pattern';
 
   export let autofocus = false;
-
   export let query = '';
+
   let selected: 'none' | number = 'none';
   let suggestions: HighlightedFragment[][] = [];
 
@@ -107,15 +107,15 @@
     aria-autocomplete="list"
     aria-expanded={suggestions.length > 0 && hasFocus}
   >
-    <MagnifyingGlass class="w-5 text-base-content" />
+    <MagnifyingGlass class="w-5 text-base-content" aria-label="Magnifying glass" />
     <!-- svelte-ignore a11y-autofocus -->
     <input
-      type="search"
       id="searchbar"
       name="q"
       {autofocus}
       placeholder="Search"
       autocomplete="off"
+      aria-expanded={suggestions.length > 0 && hasFocus}
       class="border-none bg-transparent text-lg focus:ring-0"
       on:focus={() => {
         hasFocus = true;
@@ -142,13 +142,15 @@
     </div>
 
     {#if suggestions.length > 0}
-      <div class="absolute inset-x-5 bottom-px hidden h-px bg-base-300 group-focus-within:block" />
+      <div
+        class="absolute inset-x-5 bottom-px hidden h-px bg-base-300 group-focus-within:block"
+      ></div>
       <div
         class={twJoin(
           'absolute inset-x-5 bottom-px h-px bg-base-300',
           hasFocus ? 'block' : 'hidden',
         )}
-      />
+      ></div>
       <div
         class={twJoin(
           'absolute -inset-x-px bottom-0 translate-y-full flex-col overflow-hidden rounded-3xl rounded-t-none border border-t-0 border-base-400 bg-base-100 shadow',
@@ -157,30 +159,34 @@
         role="listbox"
         bind:this={suggestionsDiv}
       >
-        {#each suggestions as s, index}
-          <button
-            class={twJoin(
-              'flex space-x-3 py-1.5 pl-5 hover:bg-base-200',
-              selected == index && 'bg-base-200',
-            )}
-            on:click={() => {
-              selectSuggestion(s);
-              hasFocus = false;
-            }}
-            type="submit"
-          >
-            <MagnifyingGlass class="w-4 text-neutral" />
-            <span>
-              {#each s as fragment}
-                {#if fragment.kind == 'highlighted'}
-                  <span class="font-medium">{fragment.text}</span>
-                {:else}
-                  {fragment.text}
-                {/if}
-              {/each}
-            </span></button
-          >
-        {/each}
+        <ul class="w-full">
+          {#each suggestions as s, index}
+            <li>
+              <button
+                class={twJoin(
+                  'flex w-full space-x-3 py-1.5 pl-5 hover:bg-base-200',
+                  selected == index && 'bg-base-200',
+                )}
+                on:click={() => {
+                  selectSuggestion(s);
+                  hasFocus = false;
+                }}
+                type="submit"
+              >
+                <MagnifyingGlass class="w-4 text-neutral" aria-label="Magnifying glass" />
+                <span>
+                  {#each s as fragment}
+                    {#if fragment.kind == 'highlighted'}
+                      <span class="font-medium">{fragment.text}</span>
+                    {:else}
+                      {fragment.text}
+                    {/if}
+                  {/each}
+                </span></button
+              >
+            </li>
+          {/each}
+        </ul>
       </div>
     {/if}
   </label>

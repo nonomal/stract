@@ -1,3 +1,4 @@
+mod cached;
 mod dictionary_encoded;
 mod serialize;
 
@@ -7,13 +8,17 @@ use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
 use crate::common::BinarySerializable;
+pub use cached::CachedColumn;
 pub use dictionary_encoded::BytesColumn;
-pub use serialize::{open_column_bytes, open_column_u64, serialize_column_mappable_to_u64};
+pub use serialize::{
+    open_column_bytes, open_column_u128, open_column_u64, serialize_column_mappable_to_u128,
+    serialize_column_mappable_to_u64,
+};
 
 use super::column_index::ColumnIndex;
 use super::column_values::monotonic_mapping::StrictlyMonotonicMappingToInternal;
 use super::column_values::{monotonic_map_column, ColumnValues};
-use super::{Cardinality, DocId, MonotonicallyMappableToU64, RowId};
+use super::{Cardinality, DocId, MonotonicallyMappableToU128, MonotonicallyMappableToU64, RowId};
 
 #[derive(Clone)]
 pub struct Column<T = u64> {
@@ -41,6 +46,25 @@ impl<T: MonotonicallyMappableToU64> Column<T> {
             index: self.index,
             values,
         }
+    }
+}
+
+impl<T: MonotonicallyMappableToU128> Column<T> {
+    pub fn to_u128_monotonic(self) -> Column<u128> {
+        let values = Arc::new(monotonic_map_column(
+            self.values,
+            StrictlyMonotonicMappingToInternal::<T>::new(),
+        ));
+        Column {
+            index: self.index,
+            values,
+        }
+    }
+}
+
+impl<T> Column<T> {
+    pub fn to_cached(self) -> CachedColumn<T> {
+        CachedColumn::new(self)
     }
 }
 

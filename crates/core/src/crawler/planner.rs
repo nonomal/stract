@@ -13,6 +13,7 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use anyhow::{anyhow, Result};
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
@@ -21,7 +22,7 @@ use itertools::Itertools;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::sync::Arc;
 use std::{
     path::Path,
@@ -29,10 +30,11 @@ use std::{
 };
 use url::Url;
 
-use crate::config::WebgraphGranularity;
 use crate::crawler::WeightedUrl;
 use crate::distributed::cluster::Cluster;
 use crate::external_sort::ExternalSorter;
+use crate::log_group::HarmonicRankGroup;
+use crate::webgraph::query::Id2NodeQuery;
 use crate::webgraph::remote::RemoteWebgraph;
 use crate::webgraph::Node;
 use crate::webpage::url_ext::UrlExt;
@@ -70,13 +72,21 @@ impl From<StoredUrl> for Url {
     }
 }
 
+/// Store urls in groups on disk based on their harmonic rank.
 struct UrlGrouper {
     groups: Vec<speedy_kv::Db<StoredUrl, ()>>,
     folder: std::path::PathBuf,
+    harmonic_group: Arc<HarmonicRankGroup>,
+    harmonic_rank: Arc<speedy_kv::Db<NodeID, u64>>,
 }
 
 impl UrlGrouper {
-    pub fn new<P>(output_path: P, num_groups: usize) -> Self
+    pub fn new<P>(
+        output_path: P,
+        num_groups: usize,
+        harmonic_group: Arc<HarmonicRankGroup>,
+        harmonic_rank: Arc<speedy_kv::Db<NodeID, u64>>,
+    ) -> Self
     where
         P: AsRef<std::path::Path>,
     {
@@ -89,16 +99,32 @@ impl UrlGrouper {
                 })
                 .collect(),
             folder,
+            harmonic_group,
+            harmonic_rank,
         }
     }
 
     fn group(&mut self, url: &StoredUrl) -> usize {
         let domain = url.icann_domain().unwrap_or_default();
 
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        domain.hash(&mut hasher);
+        let Ok(domain_url) = Url::parse(domain) else {
+            return self.groups.len() - 1;
+        };
 
-        hasher.finish() as usize % self.groups.len()
+        let id = Node::from(domain_url).id();
+
+        match self.harmonic_rank.get(&id) {
+            Ok(Some(rank)) => {
+                let group = self.harmonic_group.group(rank) as usize;
+                if group >= self.groups.len() {
+                    self.groups.len() - 1
+                } else {
+                    group
+                }
+            }
+            Ok(None) => self.groups.len() - 1,
+            Err(_) => self.groups.len() - 1,
+        }
     }
 
     pub fn insert(&mut self, url: Url) {
@@ -145,12 +171,15 @@ struct Budget {
     remaining_schedulable: u64,
 }
 
+/// Create a crawl plan based on the harmonic rank of the hosts.
 pub struct CrawlPlanner {
-    host_centrality: speedy_kv::Db<NodeID, f64>,
-    page_centrality: speedy_kv::Db<NodeID, f64>,
-    page_graph: RemoteWebgraph,
-    host_graph: RemoteWebgraph,
+    host_centrality: Arc<speedy_kv::Db<NodeID, f64>>,
+    host_centrality_rank: Arc<speedy_kv::Db<NodeID, u64>>,
+    page_centrality: Arc<speedy_kv::Db<NodeID, f64>>,
+    webgraph: RemoteWebgraph,
     config: CrawlPlannerConfig,
+
+    harmonic_group: Arc<HarmonicRankGroup>,
 
     excluded_domains: HashSet<Domain>,
 
@@ -160,14 +189,15 @@ pub struct CrawlPlanner {
 impl CrawlPlanner {
     pub async fn new(
         host_centrality: speedy_kv::Db<NodeID, f64>,
+        host_centrality_rank: speedy_kv::Db<NodeID, u64>,
         page_centrality: speedy_kv::Db<NodeID, f64>,
         cluster: Arc<Cluster>,
         config: CrawlPlannerConfig,
     ) -> Result<Self> {
         Self::check_config(&config)?;
 
-        let page_graph = RemoteWebgraph::new(cluster.clone(), WebgraphGranularity::Page).await;
-        let host_graph = RemoteWebgraph::new(cluster, WebgraphGranularity::Host).await;
+        let webgraph = RemoteWebgraph::new(cluster.clone()).await;
+        webgraph.await_ready().await;
 
         let domain_boosts = config
             .domain_boosts
@@ -178,10 +208,9 @@ impl CrawlPlanner {
             .collect();
 
         Ok(Self {
-            host_centrality,
-            page_centrality,
-            page_graph,
-            host_graph,
+            host_centrality: Arc::new(host_centrality),
+            page_centrality: Arc::new(page_centrality),
+            webgraph,
             domain_boosts,
             excluded_domains: config
                 .excluded_domains
@@ -190,6 +219,11 @@ impl CrawlPlanner {
                 .into_iter()
                 .map(Domain)
                 .collect(),
+            harmonic_group: Arc::new(HarmonicRankGroup::new(
+                host_centrality_rank.len() as u64,
+                NUM_GROUPS as u64,
+            )),
+            host_centrality_rank: Arc::new(host_centrality_rank),
             config,
         })
     }
@@ -345,7 +379,12 @@ impl CrawlPlanner {
     async fn pages_to_crawl(&self) -> (Vec<speedy_kv::Db<StoredUrl, ()>>, u64) {
         let mut budgets = self.assign_budgets();
 
-        let mut grouper = UrlGrouper::new(&self.config.output_path, NUM_GROUPS);
+        let mut grouper = UrlGrouper::new(
+            &self.config.output_path,
+            NUM_GROUPS,
+            self.harmonic_group.clone(),
+            self.host_centrality_rank.clone(),
+        );
         let mut futures = FuturesOrdered::new();
 
         let num_pages = self.page_centrality.len();
@@ -365,9 +404,14 @@ impl CrawlPlanner {
             }
 
             let nodes = chunk.collect::<Vec<_>>();
-            let page_graph = self.page_graph.clone();
+            let webgraph = self.webgraph.clone();
 
-            futures.push_back(async move { page_graph.batch_get_node(&nodes).await.unwrap() });
+            futures.push_back(async move {
+                webgraph
+                    .batch_search(nodes.into_iter().map(Id2NodeQuery::Page).collect())
+                    .await
+                    .unwrap()
+            });
         }
 
         while let Some(nodes) = futures.next().await {
@@ -402,9 +446,14 @@ impl CrawlPlanner {
             }
 
             let nodes = chunk.collect::<Vec<_>>();
-            let host_graph = self.host_graph.clone();
+            let webgraph = self.webgraph.clone();
 
-            futures.push_back(async move { host_graph.batch_get_node(&nodes).await.unwrap() });
+            futures.push_back(async move {
+                webgraph
+                    .batch_search(nodes.into_iter().map(Id2NodeQuery::Host).collect())
+                    .await
+                    .unwrap()
+            });
         }
 
         while let Some(nodes) = futures.next().await {

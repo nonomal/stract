@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -14,12 +14,22 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::{collections::VecDeque, future::Future, net::SocketAddr, sync::Arc, time::Duration};
+//! # Crawler
+//!
+//! The crawler is responsible for fetching webpages and storing them in WARC files
+//! for later processing.
+//!
+//! Before starting a crawl, a plan needs to be created. This plan is then used by
+//! the crawler coordinator to assign sites to crawl to different workers.
+//! A site is only assigned to one worker at a time for politeness.
+
+use std::{collections::VecDeque, future::Future, net::SocketAddr, sync::Arc};
 
 type HashMap<K, V> = std::collections::HashMap<K, V, ahash::RandomState>;
 
 use anyhow::anyhow;
 use futures::StreamExt;
+use robot_client::RobotClient;
 use url::Url;
 
 use crate::{config::CrawlerConfig, warc, webpage::url_ext::UrlExt};
@@ -28,12 +38,13 @@ use self::{warc_writer::WarcWriter, worker::WorkerThread};
 pub use worker::JobExecutor;
 
 pub mod coordinator;
-mod robots_txt;
+pub mod robots_txt;
 pub mod router;
 pub use router::Router;
 mod file_queue;
 pub mod planner;
-mod wander_prirotiser;
+pub mod robot_client;
+mod wander_prioritiser;
 mod warc_writer;
 mod worker;
 
@@ -58,6 +69,9 @@ pub enum Error {
     #[error("content too large")]
     ContentTooLarge,
 
+    #[error("couldn't read response body")]
+    ResponseBodyReadFailed,
+
     #[error("invalid politeness factor")]
     InvalidPolitenessFactor,
 
@@ -66,6 +80,9 @@ pub enum Error {
 
     #[error("couldn't parse html")]
     InvalidHtml,
+
+    #[error("request path is disallowed by robots.txt")]
+    DisallowedPath,
 
     #[error("an error occurred: {0}")]
     Anyhow(#[from] anyhow::Error),
@@ -250,6 +267,7 @@ pub struct CrawlDatum {
     pub payload_type: warc::PayloadType,
     pub body: String,
     pub fetch_time_ms: u64,
+    pub date: chrono::DateTime<chrono::Utc>,
 }
 
 pub struct Crawler {
@@ -262,6 +280,7 @@ impl Crawler {
         let writer = Arc::new(WarcWriter::new(config.s3.clone()));
         let mut handles = Vec::new();
         let mut router_hosts = Vec::new();
+        let client = RobotClient::new(&config)?;
 
         for host in &config.router_hosts {
             router_hosts.push(
@@ -271,8 +290,12 @@ impl Crawler {
         }
 
         for _ in 0..config.num_worker_threads {
-            let worker =
-                WorkerThread::new(Arc::clone(&writer), config.clone(), router_hosts.clone())?;
+            let worker = WorkerThread::new(
+                Arc::clone(&writer),
+                client.clone(),
+                config.clone(),
+                router_hosts.clone(),
+            )?;
 
             handles.push(tokio::spawn(async move {
                 worker.run().await;
@@ -291,33 +314,9 @@ impl Crawler {
     }
 }
 
-pub trait DatumStream: Send + Sync {
+pub trait DatumSink: Send + Sync {
     fn write(&self, crawl_datum: CrawlDatum) -> impl Future<Output = Result<()>> + Send;
     fn finish(&self) -> impl Future<Output = Result<()>> + Send;
-}
-
-pub fn reqwest_client(config: &CrawlerConfig) -> Result<reqwest::Client> {
-    let timeout = Duration::from_secs(config.timeout_seconds);
-
-    let mut headers = reqwest::header::HeaderMap::default();
-    headers.insert(
-        reqwest::header::ACCEPT,
-        reqwest::header::HeaderValue::from_static("text/html"),
-    );
-    headers.insert(
-        reqwest::header::ACCEPT_LANGUAGE,
-        reqwest::header::HeaderValue::from_static("en-US,en;q=0.9,*;q=0.8"),
-    );
-
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout)
-        .http2_keep_alive_interval(None)
-        .default_headers(headers)
-        .redirect(reqwest::redirect::Policy::limited(0))
-        .user_agent(&config.user_agent.full)
-        .build()
-        .map_err(|e| Error::from(anyhow!(e)))
 }
 
 pub async fn encoded_body(res: reqwest::Response) -> Result<String> {
@@ -338,7 +337,7 @@ pub async fn encoded_body(res: reqwest::Response) -> Result<String> {
     let mut stream = res.bytes_stream();
     while let Some(b) = stream.next().await {
         if b.is_err() {
-            return Err(Error::ContentTooLarge);
+            return Err(Error::ResponseBodyReadFailed);
         }
 
         let b = b.unwrap();

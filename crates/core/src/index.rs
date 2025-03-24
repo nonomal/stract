@@ -1,5 +1,5 @@
 // Stract is an open source web search engine.
-// Copyright (C) 2023 Stract ApS
+// Copyright (C) 2024 Stract ApS
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -14,18 +14,12 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use tantivy::tokenizer::TokenizerManager;
-
-use crate::collector::MainCollector;
-use crate::inverted_index::{self, InvertedIndex};
+use crate::inverted_index::{self, InvertedIndex, ShardId};
 use crate::query::Query;
-use crate::search_ctx::Ctx;
-use crate::webgraph::NodeID;
 use crate::webpage::region::{Region, RegionCount};
 use crate::webpage::Webpage;
 use crate::Result;
@@ -57,6 +51,14 @@ impl Index {
         })
     }
 
+    pub fn inverted_index(&self) -> &InvertedIndex {
+        &self.inverted_index
+    }
+
+    pub fn region_count(&self) -> &Mutex<RegionCount> {
+        &self.region_count
+    }
+
     pub fn path(&self) -> PathBuf {
         PathBuf::from(&self.path)
     }
@@ -65,18 +67,23 @@ impl Index {
         self.inverted_index.set_auto_merge_policy();
     }
 
-    pub fn tokenizers(&self) -> &TokenizerManager {
-        self.inverted_index.tokenizers()
+    pub fn set_shard_id(&mut self, shard_id: ShardId) {
+        self.inverted_index.set_shard_id(shard_id);
+    }
+
+    pub fn shard_id(&self) -> Option<ShardId> {
+        self.inverted_index.shard_id()
     }
 
     #[cfg(test)]
-    pub fn temporary() -> Result<Self> {
-        let path = crate::gen_temp_path();
-        let mut s = Self::open(path)?;
+    pub fn temporary() -> Result<(Self, file_store::temp::TempDir)> {
+        let dir = crate::gen_temp_dir()?;
+        let mut s = Self::open(&dir)?;
+        s.set_shard_id(ShardId::Backbone(0));
 
         s.prepare_writer()?;
 
-        Ok(s)
+        Ok((s, dir))
     }
 
     pub fn insert(&self, webpage: &Webpage) -> Result<()> {
@@ -95,26 +102,6 @@ impl Index {
         reg.commit();
 
         Ok(())
-    }
-
-    pub fn top_nodes(
-        &self,
-        query: &Query,
-        ctx: &Ctx,
-        collector: MainCollector,
-    ) -> Result<Vec<NodeID>> {
-        let websites = self
-            .inverted_index
-            .search_initial(query, ctx, collector)?
-            .top_websites;
-
-        let mut hosts = HashSet::with_capacity(websites.len());
-        for website in &websites {
-            if let Some(id) = self.inverted_index.website_host_node(website)? {
-                hosts.insert(id);
-            }
-        }
-        Ok(hosts.into_iter().collect())
     }
 
     pub fn retrieve_websites(
@@ -151,6 +138,10 @@ impl Index {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::RwLock;
+
     use crate::{
         ranking,
         searcher::{LocalSearcher, SearchQuery},
@@ -162,7 +153,7 @@ mod tests {
 
     #[test]
     fn bm25_all_docs() {
-        let mut index = Index::temporary().expect("Unable to open index");
+        let (mut index, _dir) = Index::temporary().expect("Unable to open index");
 
         index
             .insert(
@@ -230,9 +221,9 @@ mod tests {
 
         index.commit().unwrap();
 
-        let searcher = LocalSearcher::from(index);
+        let searcher = LocalSearcher::builder(Arc::new(RwLock::new(index))).build();
         let res = searcher
-            .search(&SearchQuery {
+            .search_sync(&SearchQuery {
                 query: "test".to_string(),
                 return_ranking_signals: true,
                 ..Default::default()

@@ -22,7 +22,7 @@ that our values will always be aligned with our users.
 
 ## How do we make money?
 
-We've been very fortunate to receive an incredible grant from [NLnet](https://nlnet.nl/project/Stract/) with financial support from the European Commission's [Next Generation Internet](https://ngi.eu) program which currently funds our development.
+In the past, we've been very fortunate to receive an incredible grant from [NLnet](https://nlnet.nl/project/Stract/) with financial support from the European Commission's [Next Generation Internet](https://ngi.eu) program.
 
 In the future we will have, clearly labelled, contextual ads based on your current search query and a
 subscription option without ads. Just to re-iterate; we will only use your

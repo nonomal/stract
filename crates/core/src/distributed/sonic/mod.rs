@@ -119,7 +119,7 @@ where
         }
     }
 
-    async fn send_without_timeout(&mut self, request: &Req) -> Result<Res> {
+    pub async fn send_without_timeout(&mut self, request: &Req) -> Result<Res> {
         self.awaiting_res = true;
         let bytes = bincode::encode_to_vec(request, common::bincode_config()).unwrap();
 
@@ -263,7 +263,7 @@ pub struct Request<'a, Req, Res> {
     body: Option<Req>,
 }
 
-impl<'a, Req, Res> Request<'a, Req, Res>
+impl<Req, Res> Request<'_, Req, Res>
 where
     Res: bincode::Encode,
 {

@@ -22,9 +22,6 @@ pub trait ValueTrait: TryFrom<Value> + Into<Value> {}
 
 impl ValueTrait for String {}
 
-type ApproxHarmonicMeta = crate::entrypoint::ampc::approximated_harmonic_centrality::Meta;
-impl ValueTrait for ApproxHarmonicMeta {}
-
 type F32 = f32;
 impl ValueTrait for F32 {}
 
@@ -50,6 +47,12 @@ impl ValueTrait for HyperLogLog128 {}
 type HarmonicMeta = crate::entrypoint::ampc::harmonic_centrality::Meta;
 impl ValueTrait for HarmonicMeta {}
 
+type ShortestPathMeta = crate::entrypoint::ampc::shortest_path::Meta;
+impl ValueTrait for ShortestPathMeta {}
+
+type ShortestPathChangedNodes = crate::entrypoint::ampc::shortest_path::UpdatedNodes;
+impl ValueTrait for ShortestPathChangedNodes {}
+
 impl ValueTrait for U64BloomFilter {}
 
 type Unit = ();
@@ -60,7 +63,6 @@ impl ValueTrait for Unit {}
 )]
 pub enum Value {
     String(String),
-    ApproxHarmonicMeta(ApproxHarmonicMeta),
     F32(F32),
     F64(F64),
     U64(U64),
@@ -71,6 +73,8 @@ pub enum Value {
     HyperLogLog64(HyperLogLog64),
     HyperLogLog128(HyperLogLog128),
     HarmonicMeta(HarmonicMeta),
+    ShortestPathMeta(ShortestPathMeta),
+    ShortestPathChangedNodes(ShortestPathChangedNodes),
     U64BloomFilter(U64BloomFilter),
     Unit(Unit),
 }
@@ -97,7 +101,6 @@ macro_rules! impl_from_to_value {
 }
 
 impl_from_to_value!(String, String);
-impl_from_to_value!(ApproxHarmonicMeta, ApproxHarmonicMeta);
 impl_from_to_value!(F32, F32);
 impl_from_to_value!(F64, F64);
 impl_from_to_value!(U64, U64);
@@ -108,5 +111,7 @@ impl_from_to_value!(HyperLogLog32, HyperLogLog32);
 impl_from_to_value!(HyperLogLog64, HyperLogLog64);
 impl_from_to_value!(HyperLogLog128, HyperLogLog128);
 impl_from_to_value!(HarmonicMeta, HarmonicMeta);
+impl_from_to_value!(ShortestPathMeta, ShortestPathMeta);
+impl_from_to_value!(ShortestPathChangedNodes, ShortestPathChangedNodes);
 impl_from_to_value!(U64BloomFilter, U64BloomFilter);
 impl_from_to_value!(Unit, Unit);

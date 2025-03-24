@@ -24,7 +24,7 @@ use tracing::debug;
 pub use super::indexable_webpage::IndexableWebpage;
 pub use super::job::{Job, JobSettings};
 use crate::backlink_grouper::BacklinkGrouper;
-use crate::config::{GossipConfig, IndexerConfig, IndexerDualEncoderConfig, WebgraphGranularity};
+use crate::config::{GossipConfig, IndexerConfig, IndexerDualEncoderConfig};
 use crate::distributed::cluster::Cluster;
 use crate::models::dual_encoder::DualEncoder as DualEncoderModel;
 use crate::webgraph::remote::RemoteWebgraph;
@@ -33,11 +33,12 @@ use crate::Result;
 use crate::index::Index;
 use crate::rake::RakeModel;
 use crate::ranking::SignalComputer;
-use crate::webgraph::{self, Edge, EdgeLimit, Node, NodeID};
+use crate::webgraph::{self, EdgeLimit, Node, NodeID, SmallEdgeWithLabel};
 use crate::webpage::{safety_classifier, Html, Webpage};
 
 const MAX_BACKLINKS: EdgeLimit = EdgeLimit::Limit(1024);
 
+#[derive(Clone)]
 pub enum IndexerGraphConfig {
     Local { path: String },
     Remote { gossip: GossipConfig },
@@ -55,6 +56,7 @@ impl From<crate::config::IndexerGraphConfig> for IndexerGraphConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub host_centrality_store_path: String,
     pub page_centrality_store_path: Option<String>,
@@ -90,17 +92,30 @@ impl Webgraph {
         &self,
         ids: Vec<NodeID>,
         limit: EdgeLimit,
-    ) -> Vec<Vec<Edge<String>>> {
+    ) -> Vec<Vec<SmallEdgeWithLabel>> {
         let edges = match self {
             Self::Remote(webgraph) => webgraph
-                .batch_raw_ingoing_edges_with_labels(&ids, limit)
+                .batch_search(
+                    ids.into_iter()
+                        .map(|id| {
+                            webgraph::query::BacklinksWithLabelsQuery::new(id).with_limit(limit)
+                        })
+                        .collect(),
+                )
                 .await
                 .unwrap_or_default(),
             Self::Local(webgraph) => {
                 let mut res = Vec::new();
 
                 for id in ids {
-                    res.push(webgraph.raw_ingoing_edges_with_labels(&id, limit));
+                    res.push(
+                        webgraph
+                            .search(
+                                &webgraph::query::BacklinksWithLabelsQuery::new(id)
+                                    .with_limit(limit),
+                            )
+                            .unwrap_or_default(),
+                    );
                 }
 
                 res
@@ -146,16 +161,26 @@ impl Webgraph {
     async fn new(config: &IndexerGraphConfig) -> Self {
         match config {
             IndexerGraphConfig::Local { path } => Self::Local(
-                webgraph::WebgraphBuilder::new(path)
-                    .single_threaded()
-                    .open(),
+                webgraph::WebgraphBuilder::new(path, 0u64.into())
+                    .open()
+                    .expect("webgraph should open"),
             ),
             IndexerGraphConfig::Remote { gossip } => {
                 let cluster = crate::start_gossip_cluster_thread(gossip.clone(), None);
-                Self::Remote(RemoteWebgraph::new(cluster, WebgraphGranularity::Page).await)
+                let remote = RemoteWebgraph::new(cluster).await;
+                #[cfg(not(feature = "dev"))]
+                {
+                    remote.await_ready().await;
+                }
+                Self::Remote(remote)
             }
             IndexerGraphConfig::Existing { cluster } => {
-                Self::Remote(RemoteWebgraph::new(cluster.clone(), WebgraphGranularity::Page).await)
+                let remote = RemoteWebgraph::new(cluster.clone()).await;
+                #[cfg(not(feature = "dev"))]
+                {
+                    remote.await_ready().await;
+                }
+                Self::Remote(remote)
             }
         }
     }
@@ -409,7 +434,13 @@ impl IndexingWorker {
                     BacklinkGrouper::new(self.host_centrality_rank_store.len() as u64);
 
                 for backlink in backlinks {
-                    grouper.add(backlink);
+                    let from = self
+                        .host_centrality_rank_store
+                        .get(&backlink.from)
+                        .unwrap()
+                        .unwrap_or(u64::MAX);
+
+                    grouper.add(backlink, from);
                 }
 
                 page.set_grouped_backlinks(grouper.groups())
@@ -484,14 +515,22 @@ impl IndexingWorker {
 
 #[cfg(test)]
 mod tests {
+    use file_store::temp::TempDir;
+
     use crate::config::WarcSource;
 
     use super::*;
 
-    fn setup_worker(data_path: &Path, threshold: Option<u64>) -> IndexingWorker {
-        crate::block_on(IndexingWorker::new(
+    fn setup_worker(data_path: &Path, threshold: Option<u64>) -> (IndexingWorker, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let worker = crate::block_on(IndexingWorker::new(
             IndexerConfig {
-                host_centrality_store_path: crate::gen_temp_path().to_str().unwrap().to_string(),
+                host_centrality_store_path: temp_dir
+                    .as_ref()
+                    .join("host_centrality")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
                 page_centrality_store_path: None,
                 page_webgraph: None,
                 safety_classifier_path: None,
@@ -499,11 +538,16 @@ mod tests {
                     model_path: data_path.to_str().unwrap().to_string(),
                     page_centrality_rank_threshold: threshold,
                 }),
-                output_path: crate::gen_temp_path().to_str().unwrap().to_string(),
+                output_path: temp_dir
+                    .as_ref()
+                    .join("output")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
                 limit_warc_files: None,
                 skip_warc_files: None,
                 warc_source: WarcSource::Local(crate::config::LocalConfig {
-                    folder: crate::gen_temp_path().to_str().unwrap().to_string(),
+                    folder: temp_dir.as_ref().join("warc").to_str().unwrap().to_string(),
                     names: vec!["".to_string()],
                 }),
                 host_centrality_threshold: None,
@@ -513,7 +557,9 @@ mod tests {
                     crate::config::defaults::Indexing::autocommit_after_num_inserts(),
             }
             .into(),
-        ))
+        ));
+
+        (worker, temp_dir)
     }
 
     #[test]
@@ -523,7 +569,7 @@ mod tests {
             // Skip the test if the test data is not available
             return;
         }
-        let worker = setup_worker(data_path, None);
+        let (worker, _temp_dir) = setup_worker(data_path, None);
 
         let webpages = vec![
             IndexableWebpage {
@@ -625,7 +671,7 @@ mod tests {
             // Skip the test if the test data is not available
             return;
         }
-        let worker = setup_worker(data_path, Some(100_000));
+        let (worker, _temp_dir) = setup_worker(data_path, Some(100_000));
 
         let mut a = Webpage::test_parse("<html><head><title>Homemade Heart Brownie Recipe</title></head><body>Example</body></html>", "https://a.com").unwrap();
         a.page_centrality_rank = 1;

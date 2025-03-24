@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use bloom::combine_u64s;
 use min_max_heap::MinMaxHeap;
@@ -26,7 +26,7 @@ use tantivy::{
 
 use crate::{
     config::CollectorConfig,
-    inverted_index::{DocAddress, WebpagePointer},
+    inverted_index::{DocAddress, ShardId, WebpagePointer},
     numericalfield_reader,
     prehashed::Prehashed,
     ranking::initial::{InitialScoreTweaker, Score},
@@ -43,6 +43,7 @@ pub struct TopDocs {
     columnfield_reader: numericalfield_reader::NumericalFieldReader,
     de_rank_similar: bool,
     collector_config: CollectorConfig,
+    shard_id: Option<ShardId>,
 }
 
 impl TopDocs {
@@ -57,6 +58,7 @@ impl TopDocs {
             de_rank_similar: false,
             columnfield_reader,
             collector_config: CollectorConfig::default(),
+            shard_id: None,
         }
     }
 
@@ -84,6 +86,11 @@ impl TopDocs {
         self
     }
 
+    pub fn and_shard_id(mut self, shard_id: ShardId) -> Self {
+        self.shard_id = Some(shard_id);
+        self
+    }
+
     pub fn main_collector(self, score_tweaker: InitialScoreTweaker) -> MainCollector {
         MainCollector::new(score_tweaker, self)
     }
@@ -101,7 +108,10 @@ impl TopDocs {
             .map(|max_docs| max_docs.total_docs / max_docs.segments);
 
         Ok(TopSegmentCollector {
-            columnfield_segment_reader: self.columnfield_reader.get_segment(&segment.segment_id()),
+            columnfield_segment_reader: self
+                .columnfield_reader
+                .borrow_segment(&segment.segment_id())
+                .clone(),
             max_docs,
             num_docs_taken: 0,
             segment_ord: segment_local_id,
@@ -109,16 +119,18 @@ impl TopDocs {
                 self.top_n + self.offset,
                 self.collector_config.clone(),
             ),
+            shard_id: self.shard_id,
         })
     }
 }
 
 pub struct TopSegmentCollector {
-    columnfield_segment_reader: Arc<numericalfield_reader::SegmentReader>,
+    columnfield_segment_reader: numericalfield_reader::SegmentReader,
     max_docs: Option<usize>,
     num_docs_taken: usize,
     segment_ord: SegmentOrdinal,
     bucket_collector: BucketCollector<SegmentDoc>,
+    shard_id: Option<ShardId>,
 }
 
 impl TopSegmentCollector {
@@ -148,7 +160,7 @@ impl TopSegmentCollector {
     }
 
     fn collect(&mut self, doc: DocId, score: Score) {
-        if self.is_done() {
+        if self.is_done() || doc == tantivy::TERMINATED {
             return;
         }
 
@@ -187,6 +199,7 @@ impl TopSegmentCollector {
             },
             id: doc,
             segment: self.segment_ord,
+            shard_id: self.shard_id.expect("Shard ID should be set for searches"),
             score,
         });
     }
@@ -196,6 +209,7 @@ impl TopSegmentCollector {
     }
 }
 
+#[derive(Debug, Clone)]
 struct ScoredDoc<T: Doc> {
     doc: T,
     adjusted_score: f64,
@@ -337,7 +351,11 @@ impl<T: Doc> BucketCollector<T> {
             }
         }
 
-        res.extend(simhash_dups);
+        res.extend(
+            simhash_dups
+                .into_iter()
+                .take(self.top_n.saturating_sub(res.len())),
+        );
 
         res
     }
@@ -349,6 +367,7 @@ pub struct SegmentDoc {
     id: DocId,
     segment: SegmentOrdinal,
     score: Score,
+    shard_id: ShardId,
 }
 
 impl Doc for SegmentDoc {
@@ -435,10 +454,7 @@ where
             .map(|doc| WebpagePointer {
                 score: doc.score,
                 hashes: doc.hashes,
-                address: DocAddress {
-                    segment: doc.segment,
-                    doc_id: doc.id,
-                },
+                address: DocAddress::new(doc.segment, doc.id, doc.shard_id),
             })
             .collect())
     }
@@ -486,6 +502,7 @@ mod tests {
                 id: doc.1,
                 score: Score { total: doc.2 },
                 segment: 0,
+                shard_id: ShardId::Backbone(0),
             });
         }
 

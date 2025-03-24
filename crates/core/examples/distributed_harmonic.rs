@@ -1,7 +1,11 @@
 use std::{net::SocketAddr, time::Duration};
 
 use clap::Parser;
-use stract::{distributed::member::ShardId, webgraph::Node, webpage::url_ext::UrlExt};
+use stract::{
+    distributed::member::ShardId,
+    webgraph::{Edge, Node},
+    webpage::url_ext::UrlExt,
+};
 use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
@@ -19,7 +23,6 @@ fn start_dht_thread(id: u64, host: SocketAddr, gossip: SocketAddr) {
             shard: ShardId::new(id),
             seed_node: None,
             gossip: Some(stract::config::GossipConfig {
-                cluster_id: "test".to_string(),
                 seed_nodes: Some(vec!["0.0.0.0:3001".parse().unwrap()]),
                 addr: gossip,
             }),
@@ -38,7 +41,6 @@ fn start_worker_thread(graph_path: String, shard: ShardId, host: SocketAddr, gos
     std::thread::spawn(move || {
         let config = stract::config::HarmonicWorkerConfig {
             gossip: stract::config::GossipConfig {
-                cluster_id: "test".to_string(),
                 seed_nodes: Some(vec!["0.0.0.0:3001".parse().unwrap()]),
                 addr: gossip,
             },
@@ -68,11 +70,9 @@ fn build_graphs_if_not_exist(warc_path: &str, graph_path: &str) -> anyhow::Resul
     let a_path = path.join("graph_a");
     let b_path = path.join("graph_b");
 
-    let mut a =
-        stract::webgraph::WebgraphWriter::new(a_path, Default::default(), Default::default(), None);
+    let mut a = stract::webgraph::WebgraphBuilder::new(a_path, 0u64.into()).open()?;
 
-    let mut b =
-        stract::webgraph::WebgraphWriter::new(b_path, Default::default(), Default::default(), None);
+    let mut b = stract::webgraph::WebgraphBuilder::new(b_path, 0u64.into()).open()?;
 
     for (i, record) in warc.records().flatten().enumerate() {
         let webpage = match stract::webpage::Html::parse_without_text(
@@ -99,19 +99,31 @@ fn build_graphs_if_not_exist(warc_path: &str, graph_path: &str) -> anyhow::Resul
 
             if dest_domain.is_some() && source_domain.is_some() && dest_domain != source_domain {
                 if i <= num_records / 2 {
-                    a.insert(source, destination, link.text, link.rel);
+                    a.insert(Edge {
+                        from: source,
+                        to: destination,
+                        rel_flags: link.rel,
+                        label: link.text,
+                        ..Edge::empty()
+                    })?;
                 } else {
-                    b.insert(source, destination, link.text, link.rel);
+                    b.insert(Edge {
+                        from: source,
+                        to: destination,
+                        rel_flags: link.rel,
+                        label: link.text,
+                        ..Edge::empty()
+                    })?;
                 }
             }
         }
     }
 
-    a.commit();
-    b.commit();
+    a.commit()?;
+    a.optimize_read()?;
 
-    a.finalize();
-    b.finalize();
+    b.commit()?;
+    b.optimize_read()?;
 
     Ok(())
 }
@@ -158,7 +170,6 @@ fn main() -> anyhow::Result<()> {
 
     let config = stract::config::HarmonicCoordinatorConfig {
         gossip: stract::config::GossipConfig {
-            cluster_id: "test".to_string(),
             seed_nodes: Some(vec!["0.0.0.0:3001".parse().unwrap()]),
             addr: "0.0.0.0:3007".parse().unwrap(),
         },
